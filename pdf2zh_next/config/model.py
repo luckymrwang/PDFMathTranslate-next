@@ -44,6 +44,7 @@ class BasicSettings(BaseModel):
     )
     debug: bool = Field(default=False, description="Enable debug mode")
     gui: bool = Field(default=False, description="Enable GUI mode")
+    api: bool = Field(default=False, description="Enable HTTP API server mode")
     warmup: bool = Field(
         default=False, description="Only download and verify required assets then exit"
     )

@@ -88,6 +88,12 @@ async def main() -> int:
     logger.info("Warmup babeldoc assets...")
     babeldoc.assets.assets.warmup()
 
+    if settings.basic.api:
+        from pdf2zh_next.http_api import serve
+
+        await serve()
+        return 0
+
     if settings.basic.gui:
         from pdf2zh_next.gui import setup_gui
 

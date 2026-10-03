@@ -3,7 +3,8 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 WORKDIR /app
 
 
-EXPOSE 7860
+# 7860: Gradio WebUI (--gui)  |  11008: HTTP API (--api)
+EXPOSE 7860 11008
 
 ENV PYTHONUNBUFFERED=1
 
@@ -29,4 +30,6 @@ ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
 
 RUN uv pip install --system --no-cache . && uv pip install --system --no-cache --compile-bytecode -U babeldoc "pymupdf<1.25.3" && babeldoc --version && babeldoc --warmup
 RUN pdf2zh --version
+# Default: Gradio WebUI. For the translation HTTP API service, override at runtime:
+#   docker run -p 11008:11008 <image> pdf2zh --api
 CMD ["pdf2zh", "--gui"]
