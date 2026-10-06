@@ -42,6 +42,7 @@ func main() {
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/api/login", srv.handleLogin)
 	mux.Handle("/api/me", srv.authRequired(http.HandlerFunc(srv.handleMe)))
+	mux.Handle("/api/engines", srv.authRequired(http.HandlerFunc(srv.handleEngines)))
 	mux.Handle("/api/translate", srv.authRequired(http.HandlerFunc(srv.handleTranslateSubmit)))
 	mux.Handle("/api/translate/", srv.authRequired(http.HandlerFunc(srv.handleTranslateTask)))
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -80,10 +83,81 @@ func (s *Server) handleTranslateSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit the complete request and never trust model settings supplied by the
+	// client. ParseMultipartForm spills larger files to a temporary file.
+	r.Body = http.MaxBytesReader(w, r.Body, 51<<20)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or oversized upload (max PDF 50 MB)")
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "PDF file is required")
+		return
+	}
+	defer file.Close()
+	if header.Size > 50<<20 || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
+		writeError(w, http.StatusBadRequest, "PDF must be at most 50 MB")
+		return
+	}
+	magic := make([]byte, 5)
+	if _, err := io.ReadFull(file, magic); err != nil || string(magic) != "%PDF-" {
+		writeError(w, http.StatusBadRequest, "invalid PDF file")
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusBadRequest, "cannot read PDF file")
+		return
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(r.FormValue("data")), &data); err != nil || data == nil {
+		writeError(w, http.StatusBadRequest, "invalid translation settings")
+		return
+	}
+	engine, _ := data["engine"].(string)
+	settings, ok := availableEngines()[engine]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "translation engine is unavailable")
+		return
+	}
+	// Only known, safe options are passed to Python. In particular, any
+	// translate_engine_settings/API keys from the client are discarded.
+	forward := map[string]any{
+		"lang_in": data["lang_in"], "lang_out": data["lang_out"],
+		"translate_engine_settings": settings,
+		"skip_image_translation":    true,
+	}
+	if skip, ok := data["skip_image_translation"].(bool); ok {
+		forward["skip_image_translation"] = skip
+	}
+	if pages, ok := data["pages"].(string); ok && pages != "" {
+		forward["pages"] = pages
+	}
+	if qps, ok := data["qps"].(float64); ok && qps >= 1 && qps <= 20 {
+		forward["qps"] = int(qps)
+	}
+	encoded, _ := json.Marshal(forward)
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	multipartWriter := multipart.NewWriter(writer)
+	go func() {
+		part, err := multipartWriter.CreateFormFile("file", header.Filename)
+		if err == nil {
+			_, err = io.Copy(part, file)
+		}
+		if err == nil {
+			err = multipartWriter.WriteField("data", string(encoded))
+		}
+		if err == nil {
+			err = multipartWriter.Close()
+		}
+		_ = writer.CloseWithError(err)
+	}()
 	ctx, cancel := context.WithTimeout(r.Context(), defaultSubmitTimeout)
 	defer cancel()
 
-	taskID, err := s.pdf2zh.Submit(ctx, ct, r.Body)
+	taskID, err := s.pdf2zh.Submit(ctx, multipartWriter.FormDataContentType(), reader)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "translation service unavailable")
 		return

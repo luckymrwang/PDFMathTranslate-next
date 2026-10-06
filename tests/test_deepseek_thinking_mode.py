@@ -69,6 +69,14 @@ def test_deepseek_v4_unforced_omits_extra_body_and_reasoning_effort():
     assert "reasoning_effort" not in request_kwargs
 
 
+def test_deepseek_flash_disabled_sends_extra_body():
+    settings = build_deepseek_settings("deepseek-flash", thinking_mode="disabled")
+    translator, fake_client = build_translator(settings)
+    translator.do_translate("hello")
+    assert fake_client.completions.calls[0]["model"] == "deepseek-flash"
+    assert fake_client.completions.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
 def test_deepseek_v4_disabled_sends_extra_body_without_reasoning_effort():
     settings = build_deepseek_settings(
         "deepseek-v4-flash",

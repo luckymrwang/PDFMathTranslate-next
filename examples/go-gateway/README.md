@@ -1,12 +1,12 @@
 # go-gateway — 微信小程序登录网关
 
-纯 Go 标准库实现（无第三方依赖）的微信小程序登录网关，负责：
+纯 Go 标准库实现（无第三方依赖）的微信小程序网关，负责：
 
 - 用 `wx.login` 返回的 `code` 调用微信 `code2session` 换取 `openid` / `session_key`
 - 签发自实现的 HS256 JWT 会话 token（`session_key` 永不下发给客户端）
 - 校验 Bearer token 的鉴权中间件，保护后续业务接口
 
-未来可在此网关内再接入对 Python 翻译服务（`pdf2zh --api`）的转发、OSS、队列、计费等。
+现已对接 Python 翻译 API、任务归属校验和可选 OSS 结果归档。队列、持久化任务和正式计费仍未实现；重启网关会丢失内存中的任务归属，重启 Python 服务会丢失其任务状态。
 
 ## 环境变量
 
@@ -15,8 +15,21 @@
 | `WECHAT_APPID` | 否 | `wx760bf26760f46645` | 小程序 AppID |
 | `WECHAT_APPSECRET` | **是** | — | 小程序 AppSecret（机密，仅经环境变量传入） |
 | `JWT_SECRET` | **是** | — | 签发 token 的 HMAC 密钥，至少 16 字节 |
-| `PDF2ZH_API_URL` | 否 | `http://127.0.0.1:11008` | Python 翻译服务地址（预留） |
+| `PDF2ZH_API_URL` | 否 | `http://127.0.0.1:11008` | Python 翻译服务地址 |
 | `GATEWAY_ADDR` | 否 | `:8080` | 监听地址 |
+
+### 翻译引擎
+
+Google、Bing 默认可用。下列环境变量配置后会向小程序开放对应大模型；API Key 只存于 Go 进程环境，不下发给小程序。`GET /api/engines` 返回当前可选名称。
+
+| 小程序选项 | 必需变量 | 可选变量 |
+| --- | --- | --- |
+| GPT-6 | `OPENAI_API_KEY` | `OPENAI_MODEL`（默认 `gpt-6-luna`）、`OPENAI_BASE_URL` |
+| DeepSeek-V4.1-Flash | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL`（默认 `deepseek-flash`），官方地址 `https://api.deepseek.com/v1` |
+| Gemini 2.5 Pro | `GEMINI_API_KEY` | `GEMINI_MODEL`（默认 `gemini-2.5-pro`） |
+| Claude 3.7 Sonnet | `CLAUDE_CODE_PATH`（Python 服务可执行的 Claude Code CLI 路径） | `CLAUDE_CODE_MODEL` |
+
+模型名称与实际供应商版本可能发生变化，生产环境应核对对应模型 ID。Go 会覆盖客户端传来的 `translate_engine_settings`，避免客户端注入密钥或选择未开放模型。
 
 > 安全：`WECHAT_APPSECRET` 与 `JWT_SECRET` 绝不要写进代码或日志；`session_key` 只保存在服务端。
 
@@ -41,6 +54,10 @@ export WECHAT_APPSECRET=你的小程序AppSecret
 export JWT_SECRET=$(openssl rand -hex 32)
 go run .
 ```
+
+本地模型配置已保存在 Git 忽略的 `.env` 中。设置好微信登录所需环境变量后，用 `./start.sh` 启动即可加载该文件；直接 `go run .` 不会自动加载 `.env`。不要提交或分享 `.env`。
+
+小程序标准翻译默认选择 Bing。翻译 API 默认 `skip_image_translation: true`：识别到的图片及图内文字保持原样，关闭图片 OCR，图外正文和图注继续翻译。该保护依赖版面识别，未识别成图片的区域仍可能按正文处理。
 
 ## 接口
 
@@ -83,7 +100,8 @@ wx.login({
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/translate` | `multipart/form-data`（`file` + `data` JSON），返回 `{ "id": "<taskID>" }` |
+| `GET` | `/api/engines` | 返回可用引擎名称列表，不含密钥 |
+| `POST` | `/api/translate` | `multipart/form-data`（`file` + `data` JSON，PDF 最大 50 MB），返回 `{ "id": "<taskID>" }` |
 | `GET` | `/api/translate/{id}` | 查询任务状态 |
 | `GET` | `/api/translate/{id}/stream` | SSE 实时进度 |
 | `GET` | `/api/translate/{id}/mono` | 下载单语结果 PDF（经网关代理） |
@@ -101,7 +119,7 @@ wx.login({
 }
 ```
 
-`data` 字段结构（透传给 Python API）：
+`data` 字段结构（由 Go 校验并映射到 Python API）：
 
 ```jsonc
 {
@@ -109,7 +127,7 @@ wx.login({
   "lang_out": "zh",
   "qps": 4,
   "pages": "1-5",
-  "translate_engine_settings": { "translate_engine_type": "Google" }
+  "engine": "Google"
 }
 ```
 
@@ -121,7 +139,7 @@ wx.uploadFile({
   filePath: tempFilePath,
   name: 'file',
   header: { Authorization: 'Bearer ' + wx.getStorageSync('token') },
-  formData: { data: JSON.stringify({ lang_in: 'en', lang_out: 'zh' }) },
+  formData: { data: JSON.stringify({ lang_in: 'en', lang_out: 'zh', engine: 'Google' }) },
   success: ({ data }) => {
     const { id } = JSON.parse(data)
     // 之后用 id 轮询 /api/translate/{id} 或下载 /api/translate/{id}/dual
@@ -130,6 +148,15 @@ wx.uploadFile({
 ```
 
 > 注意：微信小程序端不支持 SSE，建议用 `GET /api/translate/{id}` 轮询进度；`/stream` 供 Web/服务端消费。
+
+### 与小程序联调
+
+1. 在本项目启动 Python 服务：`PDF2ZH_API_HOST=127.0.0.1 pdf2zh --api`（默认端口 `11008`）；不要把未鉴权的 Python API 直接暴露到公网。
+2. 设置 `WECHAT_APPSECRET` 和至少 16 字节的 `JWT_SECRET` 后运行 `go run .`。
+3. 小程序目录 `/Users/sino/Documents/www/bucket/wxapp/pdftranslate` 的 `config.js` 已默认指向本机 `http://127.0.0.1:8080`，供微信开发者工具联调；开发工具须临时关闭合法域名校验。
+4. 真机及正式发布时，将小程序 `baseUrl` 改为可访问的 HTTPS 网关域名；在微信公众平台配置该域名为 request、uploadFile、downloadFile 合法域名。若启用 OSS，OSS 下载域名也须列入 downloadFile 合法域名。`127.0.0.1` 在手机上指手机自身，不能用于真机。
+
+当前确认弹层仅展示本地 PDF 页数估算及参考金额，没有订单、微信支付或真实扣费；上线前须另行接入服务端计费和支付流程。
 
 ### `GET /health`
 
@@ -143,4 +170,3 @@ wx.uploadFile({
 go vet ./...
 go test ./...   # token 签发/校验/防篡改/过期用例
 ```
-

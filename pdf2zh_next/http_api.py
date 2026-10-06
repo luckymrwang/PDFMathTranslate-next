@@ -79,6 +79,7 @@ class TranslateRequest(BaseModel):
     pages: str | None = Field(default=None)
     no_mono: bool = Field(default=False)
     no_dual: bool = Field(default=False)
+    skip_image_translation: bool = Field(default=True)
     watermark_output_mode: Literal["watermarked", "no_watermark", "both"] = Field(
         default="watermarked"
     )
@@ -162,6 +163,7 @@ def _build_settings(req: TranslateRequest, output_dir: Path) -> SettingsModel:
     settings.pdf.pages = req.pages
     settings.pdf.no_mono = req.no_mono
     settings.pdf.no_dual = req.no_dual
+    settings.pdf.skip_image_translation = req.skip_image_translation
     settings.pdf.watermark_output_mode = req.watermark_output_mode
     return settings
 

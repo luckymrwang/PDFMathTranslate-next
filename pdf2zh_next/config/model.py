@@ -177,6 +177,10 @@ class PDFSettings(BaseModel):
     translate_table_text: bool = Field(
         default=True, description="Translate table text (experimental)"
     )
+    skip_image_translation: bool = Field(
+        default=False,
+        description="Preserve detected figure regions and their text; disable image OCR",
+    )
     skip_scanned_detection: bool = Field(
         default=False, description="Skip scanned detection"
     )

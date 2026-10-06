@@ -579,12 +579,19 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
 
         table_model = RapidOCRModel()
 
+    doc_layout_model = None
+    if settings.pdf.skip_image_translation:
+        from babeldoc.docvision.base_doclayout import DocLayoutModel
+        from pdf2zh_next.layout_protection import FigurePreservingLayoutModel
+
+        doc_layout_model = FigurePreservingLayoutModel(DocLayoutModel.load_available())
+
     babeldoc_config = BabelDOCConfig(
         input_file=file,
         font=None,
         pages=settings.pdf.pages,
         output_dir=settings.translation.output,
-        doc_layout_model=None,
+        doc_layout_model=doc_layout_model,
         translator=translator,
         debug=settings.basic.debug,
         lang_in=settings.translation.lang_in,
@@ -610,10 +617,10 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
         # 添加表格模型，仅在需要翻译表格时
         table_model=table_model,
         skip_scanned_detection=settings.pdf.skip_scanned_detection,
-        ocr_workaround=settings.pdf.ocr_workaround,
+        ocr_workaround=settings.pdf.ocr_workaround and not settings.pdf.skip_image_translation,
         custom_system_prompt=settings.translation.custom_system_prompt,
         glossaries=_get_glossaries(settings),
-        auto_enable_ocr_workaround=settings.pdf.auto_enable_ocr_workaround,
+        auto_enable_ocr_workaround=settings.pdf.auto_enable_ocr_workaround and not settings.pdf.skip_image_translation,
         pool_max_workers=settings.translation.pool_max_workers,
         auto_extract_glossary=not settings.translation.no_auto_extract_glossary,
         primary_font_family=settings.translation.primary_font_family,
