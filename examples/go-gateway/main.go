@@ -6,18 +6,20 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
 // Server holds the gateway dependencies.
 type Server struct {
-	cfg     *Config
-	wx      *WeChatClient
-	pdf2zh  *Pdf2zhClient
-	tasks   *taskRegistry
-	storage *S3Client // nil when object storage is not configured
-	pay     *PayService
+	prepared preparedFiles
+	cfg      *Config
+	wx       *WeChatClient
+	pdf2zh   *Pdf2zhClient
+	tasks    *taskRegistry
+	storage  *S3Client // nil when object storage is not configured
+	pay      *PayService
 }
 
 func main() {
@@ -41,6 +43,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("payment storage error: %v", err)
 		}
+		if err := cleanupPreparedFiles(filepath.Join(store.dir, "uploads")); err != nil {
+			log.Fatalf("preparation cleanup error: %v", err)
+		}
 		srv.pay = &PayService{cfg: payConfig, store: store, client: newXPayClient(cfg, payConfig),
 			sessions: &paySessions{keys: make(map[string]paySession)}}
 		for _, order := range store.all() {
@@ -63,6 +68,9 @@ func main() {
 	mux.HandleFunc("/api/login", srv.handleLogin)
 	mux.Handle("/api/me", srv.authRequired(http.HandlerFunc(srv.handleMe)))
 	mux.Handle("/api/engines", srv.authRequired(http.HandlerFunc(srv.handleEngines)))
+	mux.Handle("/api/engines/check", srv.authRequired(http.HandlerFunc(srv.handleEngineCheck)))
+	mux.Handle("/pay/prepare", srv.authRequired(http.HandlerFunc(srv.handlePreparePDF)))
+	mux.Handle("/pay/order/prepared", srv.authRequired(http.HandlerFunc(srv.handlePreparedOrder)))
 	mux.Handle("/api/translate", srv.authRequired(http.HandlerFunc(srv.handleTranslateSubmit)))
 	mux.Handle("/api/translate/", srv.authRequired(http.HandlerFunc(srv.handleTranslateTask)))
 	mux.Handle("/pay/config", srv.authRequired(http.HandlerFunc(srv.handlePayConfig)))

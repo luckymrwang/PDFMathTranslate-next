@@ -16,6 +16,8 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
         self.original_dir = api.WORK_DIR
         api.WORK_DIR = Path(self.directory.name)
         api._paid_submit_lock = None
+        api._engine_checks.clear()
+        api._engine_checked_at.clear()
         api._tasks.clear()
         self.runner = AsyncMock()
         self.patch = patch.object(api, "_run_translation", self.runner)
@@ -84,6 +86,30 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(api._tasks), 1)
         await asyncio.sleep(0)
         self.assertEqual(self.runner.call_count, 1)
+
+    async def test_engine_prewarm_reused_and_expiry_rechecked(self):
+        with patch("pdf2zh_next.translator.get_translator") as check:
+            results = await asyncio.gather(*[
+                self.client.post("/v1/engine/check", json={}) for _ in range(3)
+            ])
+            self.assertTrue(all(r.status_code == 200 for r in results))
+            result = await self.client.post("/v1/pdf/inspect",
+                files={"file": ("document.pdf", self.pdf, "application/pdf")},
+                data={"data": '{"lang_in":"en"}'})
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(check.call_count, 1)
+            for key in api._engine_checked_at:
+                api._engine_checked_at[key] -= 301
+            await self.client.post("/v1/engine/check", json={})
+            self.assertEqual(check.call_count, 2)
+
+    async def test_failed_prewarm_is_not_cached(self):
+        with patch("pdf2zh_next.translator.get_translator", side_effect=RuntimeError("secret")) as check:
+            for _ in range(2):
+                result = await self.client.post("/v1/engine/check", json={})
+                self.assertEqual(result.status_code, 503)
+                self.assertNotIn("secret", result.text)
+            self.assertEqual(check.call_count, 2)
 
     async def test_restart_cannot_silently_repeat_paid_job(self):
         first = await self.client.post(

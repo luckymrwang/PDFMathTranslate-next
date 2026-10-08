@@ -63,6 +63,28 @@ async function run() {
   page.unloaded = true
   await page.confirmTranslation()
   assert.equal(navigations, 1, 'Do not navigate after page destruction')
+  page.unloaded = false
+  page.fileRevision = 1
+  page.data.filePath = 'first.pdf'
+  let uploads = 0, complete
+  api.preparePdf = () => {
+    uploads++
+    return new Promise(resolve => { complete = resolve })
+  }
+  const first = page.prepareSelectedFile()
+  const again = page.prepareSelectedFile()
+  assert.equal(first, again, 'Concurrent callers must share an upload')
+  complete({ file_token: 'file-1', page_count: 16, expires_at: Date.now() / 1000 + 1800 })
+  await first
+  await page.prepareSelectedFile()
+  assert.equal(uploads, 1, 'Ready files must be reused')
+  page.data.filePath = 'second.pdf'
+  page.fileRevision++
+  const stale = page.prepareSelectedFile()
+  page.removeFile()
+  complete({ file_token: 'stale', page_count: 99, expires_at: Date.now() / 1000 + 1800 })
+  await assert.rejects(stale, /文件已变更/)
+  assert.equal(page.preparedFile, null, 'Removed file must not return from an old request')
   console.log('PASS: versions, integer fen, signed payload, server payment proof, lifecycle')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

@@ -319,6 +319,45 @@ async def _create_translation(
 
 
 _paid_submit_lock: asyncio.Lock | None = None
+_engine_checks: dict[str, asyncio.Task] = {}
+_engine_checked_at: dict[str, float] = {}
+
+
+async def _check_engine(request: TranslateRequest) -> None:
+    # Cache only successful checks; concurrent callers share the same probe.
+    from pdf2zh_next.translator import get_translator
+
+    settings = _build_settings(request, WORK_DIR)
+    key = hashlib.sha256(json.dumps(
+        request.translate_engine_settings, sort_keys=True
+    ).encode()).hexdigest()
+    if time.monotonic() - _engine_checked_at.get(key, float("-inf")) < 300:
+        return
+    task = _engine_checks.get(key)
+    if task is None:
+        async def probe():
+            try:
+                await asyncio.to_thread(get_translator, settings)
+                _engine_checked_at[key] = time.monotonic()
+                if len(_engine_checked_at) > 128:
+                    oldest = min(_engine_checked_at, key=_engine_checked_at.get)
+                    del _engine_checked_at[oldest]
+            finally:
+                _engine_checks.pop(key, None)
+        task = asyncio.create_task(probe())
+        # Retrieve exceptions even when a prewarm client disconnects.
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        _engine_checks[key] = task
+    await asyncio.shield(task)
+
+
+@app.post("/v1/engine/check")
+async def check_engine(request: TranslateRequest) -> dict[str, bool]:
+    try:
+        await _check_engine(request)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="translation engine unavailable") from error
+    return {"ready": True}
 
 
 @app.post("/v1/pdf/inspect")
@@ -354,11 +393,8 @@ async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[
             # Payment quotes must not sell a translation with an unavailable
             # engine. A minimal Hello health check validates credentials first.
             try:
-                from pdf2zh_next.translator import get_translator
-
                 request = TranslateRequest.model_validate_json(data)
-                settings = _build_settings(request, Path(tmp.name).parent)
-                await asyncio.to_thread(get_translator, settings)
+                await _check_engine(request)
             except Exception as error:
                 raise HTTPException(status_code=503, detail="translation engine unavailable") from error
         return {"page_count": pages}

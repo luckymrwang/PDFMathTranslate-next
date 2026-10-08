@@ -103,6 +103,9 @@ wx.login({
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/engines` | 返回可用引擎名称列表，不含密钥 |
+| `POST` | `/api/engines/check` | 后台检查选中引擎；Python 成功结果缓存 5 分钟 |
+| `POST` | `/pay/prepare` | 提前上传 PDF 并读取页数，返回用户绑定的 file_token、page_count、expires_at |
+| `POST` | `/pay/order/prepared` | JSON 提交 file_token、engine、lang_in、lang_out；复用文件创建订单 |
 | `POST` | `/api/translate` | `multipart/form-data`（`file` + `data` JSON，PDF 最大 50 MB），返回 `{ "id": "<taskID>" }` |
 | `GET` | `/api/translate/{id}` | 查询任务状态 |
 | `GET` | `/api/translate/{id}/stream` | SSE 实时进度 |
@@ -110,6 +113,15 @@ wx.login({
 | `GET` | `/api/translate/{id}/dual` | 下载双语结果 PDF（经网关代理） |
 | `GET` | `/api/translate/{id}/result` | 转存结果到对象存储，返回预签名临时下载 URL（需配置 OSS） |
 | `DELETE` | `/api/translate/{id}` | 取消任务 |
+
+文件预处理在选完 PDF 后开始，与模型预检查并行。文件凭证有效期为 30 分钟，
+每用户最多保留 5 份、单进程最多 100 份准备文件；到期删除准备文件，
+已创建订单持有独立硬链接，不受凭证到期影响。未命中模型缓存时，下单仍会检查引擎。
+旧版 multipart `/pay/order` 保留兼容。
+
+凭证仅在单个 Go 进程内有效，重启后客户端需要重新准备文件；启动时会清理
+上一进程留下的 `.prepare-*.pdf`。当前部署应使用单个网关进程及本地持久化订单目录，
+多实例部署需要共享凭证存储与文件存储。更新时先部署 Python，再重启 Go，最后编译小程序。
 
 `GET /api/translate/{id}/result` 响应（任务完成后调用；首次调用触发转存，之后幂等返回新签名）：
 
