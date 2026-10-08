@@ -130,6 +130,7 @@ celerybeat.pid
 
 # Environments
 .env
+/examples/go-gateway/data/
 .venv
 env/
 venv/

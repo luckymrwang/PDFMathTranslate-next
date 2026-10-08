@@ -21,6 +21,7 @@ Python worker as a stateless unit.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ from typing import Literal
 
 from fastapi import FastAPI
 from fastapi import Form
+from fastapi import Header
 from fastapi import HTTPException
 from fastapi import UploadFile
 from fastapi.responses import FileResponse
@@ -271,8 +273,7 @@ async def health() -> dict[str, Any]:
     }
 
 
-@app.post("/v1/translate")
-async def create_translation(
+async def _create_translation(
     file: UploadFile,
     data: str = Form(default="{}"),
 ) -> dict[str, str]:
@@ -315,6 +316,95 @@ async def create_translation(
     task.worker = asyncio.create_task(_run_translation(task, settings))
 
     return {"id": task_id}
+
+
+_paid_submit_lock: asyncio.Lock | None = None
+
+
+@app.post("/v1/pdf/inspect")
+async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[str, int]:
+    """Server-side page count for pricing; never trust a client's quantity."""
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="only PDF files are supported")
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+        size = 0
+        while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+            size += len(chunk)
+            if size > 50 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="PDF exceeds 50 MB")
+            tmp.write(chunk)
+        tmp.flush()
+
+        def count_pages():
+            import pymupdf
+
+            try:
+                with pymupdf.open(tmp.name) as document:
+                    if not document.is_pdf or document.needs_pass:
+                        raise ValueError("encrypted or invalid PDF")
+                    pages = document.page_count
+                    if not 1 <= pages <= 1000:
+                        raise ValueError("PDF must contain 1 to 1000 pages")
+                    return pages
+            except Exception as error:
+                raise HTTPException(status_code=422, detail="cannot inspect PDF") from error
+
+        pages = await asyncio.to_thread(count_pages)
+        if data != "{}":
+            # Payment quotes must not sell a translation with an unavailable
+            # engine. A minimal Hello health check validates credentials first.
+            try:
+                from pdf2zh_next.translator import get_translator
+
+                request = TranslateRequest.model_validate_json(data)
+                settings = _build_settings(request, Path(tmp.name).parent)
+                await asyncio.to_thread(get_translator, settings)
+            except Exception as error:
+                raise HTTPException(status_code=503, detail="translation engine unavailable") from error
+        return {"page_count": pages}
+
+
+@app.post("/v1/translate")
+async def create_translation(
+    file: UploadFile,
+    data: str = Form(default="{}"),
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+) -> dict[str, str]:
+    if not idempotency_key:
+        return await _create_translation(file, data)
+    if len(idempotency_key) > 100:
+        raise HTTPException(status_code=400, detail="invalid idempotency key")
+    global _paid_submit_lock
+    if _paid_submit_lock is None:
+        _paid_submit_lock = asyncio.Lock()
+    async with _paid_submit_lock:
+        key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        directory = WORK_DIR / "idempotency"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker = directory / (key_hash + ".json")
+        if marker.exists():
+            task_id = json.loads(marker.read_text())["id"]
+            if task_id not in _tasks:
+                # Paid jobs cannot silently run twice after a worker restart.
+                raise HTTPException(status_code=409, detail="previous paid task requires recovery")
+            return {"id": task_id}
+        result = await _create_translation(file, data)
+        temp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as tmp:
+                temp_name = tmp.name
+                json.dump(result, tmp)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(temp_name, marker)
+        except Exception:
+            if temp_name:
+                Path(temp_name).unlink(missing_ok=True)
+            task = _tasks.pop(result["id"])
+            task.worker.cancel()
+            shutil.rmtree(task.input_path.parent, ignore_errors=True)
+            raise
+        return result
 
 
 def _require_task(task_id: str) -> TaskState:

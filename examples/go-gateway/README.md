@@ -6,7 +6,9 @@
 - 签发自实现的 HS256 JWT 会话 token（`session_key` 永不下发给客户端）
 - 校验 Bearer token 的鉴权中间件，保护后续业务接口
 
-现已对接 Python 翻译 API、任务归属校验和可选 OSS 结果归档。队列、持久化任务和正式计费仍未实现；重启网关会丢失内存中的任务归属，重启 Python 服务会丢失其任务状态。
+现已对接 Python 翻译 API、任务归属校验、可选 OSS 结果归档和个人主体虚拟支付。支付订单和付费任务归属可从磁盘恢复；普通任务归属和 Python 任务状态仍在内存中。尚未实现分布式队列或完整任务恢复。
+
+虚拟支付配置见 [VIRTUAL_PAYMENT.md](VIRTUAL_PAYMENT.md)，逐项部署验收见 [VIRTUAL_PAYMENT_ACCEPTANCE.md](VIRTUAL_PAYMENT_ACCEPTANCE.md)。未配置时支付默认关闭；启用后普通提交接口拒绝绕过支付。
 
 ## 环境变量
 
@@ -156,7 +158,7 @@ wx.uploadFile({
 3. 小程序目录 `/Users/sino/Documents/www/bucket/wxapp/pdftranslate` 的 `config.js` 已默认指向本机 `http://127.0.0.1:8080`，供微信开发者工具联调；开发工具须临时关闭合法域名校验。
 4. 真机及正式发布时，将小程序 `baseUrl` 改为可访问的 HTTPS 网关域名；在微信公众平台配置该域名为 request、uploadFile、downloadFile 合法域名。若启用 OSS，OSS 下载域名也须列入 downloadFile 合法域名。`127.0.0.1` 在手机上指手机自身，不能用于真机。
 
-当前确认弹层仅展示本地 PDF 页数估算及参考金额，没有订单、微信支付或真实扣费；上线前须另行接入服务端计费和支付流程。
+真实模式确认弹层由服务器读取 PDF 实际页数并返回订单金额，再调用 `wx.requestVirtualPayment`。只有服务端确认已支付才能开始翻译。演示模式仍为本地估算，不扣费。
 
 ### `GET /health`
 
@@ -168,5 +170,8 @@ wx.uploadFile({
 
 ```bash
 go vet ./...
-go test ./...   # token 签发/校验/防篡改/过期用例
+go test -race ./...   # JWT、支付门禁、签名、幂等、订单持久化与并发
+node virtualpay-miniapp.test.cjs /Users/sino/Documents/www/bucket/wxapp/pdftranslate
 ```
+
+Python 支付接口测试在项目根目录使用已安装项目依赖的环境运行：`python -m unittest discover -s tests -p test_virtualpay_api.py -v`。测试均使用本地模拟，不进行真实支付。

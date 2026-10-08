@@ -17,6 +17,7 @@ type Server struct {
 	pdf2zh  *Pdf2zhClient
 	tasks   *taskRegistry
 	storage *S3Client // nil when object storage is not configured
+	pay     *PayService
 }
 
 func main() {
@@ -30,6 +31,25 @@ func main() {
 		wx:     NewWeChatClient(cfg.AppID, cfg.AppSecret),
 		pdf2zh: NewPdf2zhClient(cfg.Pdf2zhURL),
 		tasks:  newTaskRegistry(),
+	}
+	payConfig, err := loadPayConfig()
+	if err != nil {
+		log.Fatalf("payment config error: %v", err)
+	}
+	if payConfig.Enabled {
+		store, err := openOrderStore(payConfig.Dir)
+		if err != nil {
+			log.Fatalf("payment storage error: %v", err)
+		}
+		srv.pay = &PayService{cfg: payConfig, store: store, client: newXPayClient(cfg, payConfig),
+			sessions: &paySessions{keys: make(map[string]paySession)}}
+		for _, order := range store.all() {
+			if order.TaskID != "" {
+				srv.tasks.set(order.TaskID, order.OpenID)
+			}
+		}
+		go srv.runPayReconciliation(context.Background())
+		log.Printf("virtual payment enabled (production environment, durable order store)")
 	}
 	if s3cfg, ok := LoadS3Config(); ok {
 		srv.storage = NewS3Client(s3cfg)
@@ -45,6 +65,12 @@ func main() {
 	mux.Handle("/api/engines", srv.authRequired(http.HandlerFunc(srv.handleEngines)))
 	mux.Handle("/api/translate", srv.authRequired(http.HandlerFunc(srv.handleTranslateSubmit)))
 	mux.Handle("/api/translate/", srv.authRequired(http.HandlerFunc(srv.handleTranslateTask)))
+	mux.Handle("/pay/config", srv.authRequired(http.HandlerFunc(srv.handlePayConfig)))
+	mux.Handle("/pay/order", srv.authRequired(http.HandlerFunc(srv.handlePayOrder)))
+	mux.Handle("/pay/orders", srv.authRequired(http.HandlerFunc(srv.handlePayOrders)))
+	mux.Handle("/pay/orders/", srv.authRequired(http.HandlerFunc(srv.handlePayOrders)))
+	mux.Handle("/pay/query", srv.authRequired(http.HandlerFunc(srv.handlePayQuery)))
+	mux.HandleFunc("/pay/notify", srv.handlePayNotify)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
@@ -100,14 +126,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NOTE: session.SessionKey must be kept server-side. Persist it (e.g. in
-	// Redis keyed by openid) if you need to decrypt wx encrypted data later.
-	// It is deliberately NOT returned to the client.
-
 	token, err := IssueToken(s.cfg.JWTSecret, session.OpenID, s.cfg.TokenTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to issue token")
 		return
+	}
+	if s.payEnabled() {
+		if session.SessionKey == "" {
+			writeError(w, 502, "wechat returned no session key")
+			return
+		}
+		s.pay.sessions.set(token, session.SessionKey)
 	}
 
 	writeJSON(w, http.StatusOK, loginResponse{

@@ -76,6 +76,10 @@ func (s *Server) handleTranslateSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
+	if s.payEnabled() {
+		writeError(w, http.StatusPaymentRequired, "请通过已支付订单启动翻译")
+		return
+	}
 
 	ct := r.Header.Get("Content-Type")
 	if !strings.HasPrefix(ct, "multipart/form-data") {
@@ -192,6 +196,10 @@ func (s *Server) handleTranslateTask(w http.ResponseWriter, r *http.Request) {
 	if !s.tasks.owns(taskID, openid) {
 		// Do not reveal whether the task exists for another user.
 		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if s.taskRefunded(taskID) {
+		writeError(w, http.StatusForbidden, "订单已退款，翻译权益已撤销")
 		return
 	}
 

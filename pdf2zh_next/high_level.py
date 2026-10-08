@@ -617,10 +617,15 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
         # 添加表格模型，仅在需要翻译表格时
         table_model=table_model,
         skip_scanned_detection=settings.pdf.skip_scanned_detection,
-        ocr_workaround=settings.pdf.ocr_workaround and not settings.pdf.skip_image_translation,
+        ocr_workaround=(
+            settings.pdf.ocr_workaround and not settings.pdf.skip_image_translation
+        ),
         custom_system_prompt=settings.translation.custom_system_prompt,
         glossaries=_get_glossaries(settings),
-        auto_enable_ocr_workaround=settings.pdf.auto_enable_ocr_workaround and not settings.pdf.skip_image_translation,
+        auto_enable_ocr_workaround=(
+            settings.pdf.auto_enable_ocr_workaround
+            and not settings.pdf.skip_image_translation
+        ),
         pool_max_workers=settings.translation.pool_max_workers,
         auto_extract_glossary=not settings.translation.no_auto_extract_glossary,
         primary_font_family=settings.translation.primary_font_family,
