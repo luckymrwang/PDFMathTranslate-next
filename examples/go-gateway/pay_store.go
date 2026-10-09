@@ -52,6 +52,12 @@ type PayOrder struct {
 	State, WxOrderID, TaskID                                            string
 	Provided                                                            bool
 	CreatedAt, LastQuery                                                int64
+	// Delivery is "" while translating, "archived" once results are durable, "failed" when retries are exhausted.
+	Delivery           string
+	Attempts           int
+	TaskHistory        []string
+	MonoFile, DualFile string
+	MonoKey, DualKey   string
 }
 
 type OrderStore struct {
@@ -61,7 +67,7 @@ type OrderStore struct {
 }
 
 func openOrderStore(dir string) (*OrderStore, error) {
-	for _, path := range []string{dir, filepath.Join(dir, "orders"), filepath.Join(dir, "uploads")} {
+	for _, path := range []string{dir, filepath.Join(dir, "orders"), filepath.Join(dir, "uploads"), filepath.Join(dir, "results")} {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			return nil, err
 		}

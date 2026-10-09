@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,8 @@ type PayService struct {
 	store    *OrderStore
 	client   *XPayClient
 	sessions *paySessions
-	startMu  sync.Mutex
+	createMu sync.Mutex
+	locks    orderLocks
 }
 
 func (s *Server) payEnabled() bool { return s.pay != nil && s.pay.cfg.Enabled }
@@ -104,6 +106,9 @@ func (s *Server) uploadFile(ctx context.Context, endpoint, path, name string, pa
 	defer resp.Body.Close()
 	if streamErr != nil {
 		return nil, errors.New("PDF transfer failed")
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return nil, errSubmitConflict
 	}
 	if resp.StatusCode != 200 {
 		return nil, errors.New("python rejected PDF or translation settings")
@@ -405,16 +410,38 @@ func (s *Server) reconcileOrder(ctx context.Context, id string) error {
 }
 
 func (s *Server) startPaidOrder(ctx context.Context, id string) (string, error) {
-	s.pay.startMu.Lock()
-	defer s.pay.startMu.Unlock()
-	order, ok := s.pay.store.get(id)
-	if !ok || (order.State != "paid" && order.State != "submitted") {
-		return "", errors.New("unpaid order")
+	unlock, _ := s.pay.locks.acquire(id, true)
+	defer unlock()
+	return s.startPaidOrderLocked(ctx, id)
+}
+
+// startPaidOrderLocked requires the caller to hold the order lock.
+func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, error) {
+	for {
+		order, ok := s.pay.store.get(id)
+		if !ok || (order.State != "paid" && order.State != "submitted") {
+			return "", errors.New("unpaid order")
+		}
+		if order.Delivery == "failed" {
+			return "", errors.New("paid translation failed")
+		}
+		if order.TaskID != "" {
+			s.tasks.set(order.TaskID, order.OpenID)
+			return order.TaskID, nil
+		}
+		taskID, err := s.submitPaidOrder(ctx, order)
+		if errors.Is(err, errSubmitConflict) {
+			// The worker lost the task bound to this attempt's key; retry under a fresh key.
+			if err := s.nextPaidAttempt(order.ID); err != nil {
+				return "", err
+			}
+			continue
+		}
+		return taskID, err
 	}
-	if order.TaskID != "" {
-		s.tasks.set(order.TaskID, order.OpenID)
-		return order.TaskID, nil
-	}
+}
+
+func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, error) {
 	settings, ok := availableEngines()[order.Engine]
 	if !ok {
 		return "", errors.New("engine unavailable")
@@ -429,11 +456,15 @@ func (s *Server) startPaidOrder(ctx context.Context, id string) (string, error) 
 	if err != nil || hex.EncodeToString(hash.Sum(nil)) != order.FileHash {
 		return "", errors.New("order file changed")
 	}
+	key := "virtualpay:" + order.ID
+	if order.Attempts > 0 {
+		key += ":" + strconv.Itoa(order.Attempts)
+	}
 	ctx, cancel := context.WithTimeout(ctx, defaultSubmitTimeout)
 	defer cancel()
 	body, err := s.uploadFile(ctx, "/v1/translate", order.FilePath, order.Name,
 		map[string]any{"lang_in": order.LangIn, "lang_out": order.LangOut, "qps": 4,
-			"skip_image_translation": true, "translate_engine_settings": settings}, "virtualpay:"+id)
+			"skip_image_translation": true, "translate_engine_settings": settings}, key)
 	if err != nil {
 		return "", err
 	}
@@ -443,7 +474,7 @@ func (s *Server) startPaidOrder(ctx context.Context, id string) (string, error) 
 	if json.Unmarshal(body, &result) != nil || result.ID == "" {
 		return "", errors.New("invalid task response")
 	}
-	err = s.pay.store.update(id, func(current *PayOrder) error {
+	err = s.pay.store.update(order.ID, func(current *PayOrder) error {
 		if current.State == "refunded" {
 			return errors.New("order refunded")
 		}
@@ -452,12 +483,9 @@ func (s *Server) startPaidOrder(ctx context.Context, id string) (string, error) 
 		return nil
 	})
 	if err != nil {
-		current, _ := s.pay.store.get(id)
+		current, _ := s.pay.store.get(order.ID)
 		if current.State == "refunded" {
-			resp, cancelErr := s.pdf2zh.Request(ctx, http.MethodDelete, "/v1/translate/"+result.ID)
-			if cancelErr == nil {
-				resp.Body.Close()
-			}
+			s.deleteUpstreamTask(ctx, result.ID)
 		}
 		return "", err
 	}
@@ -466,30 +494,37 @@ func (s *Server) startPaidOrder(ctx context.Context, id string) (string, error) 
 }
 
 func (s *Server) runPayReconciliation(ctx context.Context) {
+	round := 0
 	recoverOrders := func() {
+		queryWeChat := round%5 == 0
+		round++
 		for _, order := range s.pay.store.all() {
 			if ctx.Err() != nil {
 				return
 			}
-			if order.State == "pending" || order.State == "paid" || order.State == "submitted" {
+			if order.Delivery != "" {
+				continue
+			}
+			if queryWeChat && (order.State == "pending" || order.State == "paid" || order.State == "submitted") {
 				checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				if err := s.reconcileOrder(checkCtx, order.ID); err != nil {
 					log.Printf("virtual payment reconcile failed (order=%s): %v", order.ID, err)
 				}
 				cancel()
-				fresh, _ := s.pay.store.get(order.ID)
-				if fresh.State == "paid" {
-					startCtx, cancel := context.WithTimeout(ctx, defaultSubmitTimeout)
-					if _, err := s.startPaidOrder(startCtx, fresh.ID); err != nil {
-						log.Printf("paid translation submission failed (order=%s)", fresh.ID)
-					}
-					cancel()
+			}
+			fresh, _ := s.pay.store.get(order.ID)
+			if fresh.State == "paid" || fresh.State == "submitted" {
+				advanceCtx, cancel := context.WithTimeout(ctx, defaultSubmitTimeout)
+				if err := s.advancePaidOrder(advanceCtx, fresh.ID, true); err != nil {
+					log.Printf("paid translation delivery pending (order=%s): %v", fresh.ID, err)
 				}
+				cancel()
 			}
 		}
 	}
 	recoverOrders()
-	ticker := time.NewTicker(5 * time.Minute)
+	// Poll often enough to archive results well within the worker's task TTL.
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
@@ -502,15 +537,8 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 }
 
 func (s *Server) taskRefunded(taskID string) bool {
-	if !s.payEnabled() {
-		return false
-	}
-	for _, order := range s.pay.store.all() {
-		if order.TaskID == taskID && order.State == "refunded" {
-			return true
-		}
-	}
-	return false
+	order, ok := s.paidOrderForTask(taskID)
+	return ok && order.State == "refunded"
 }
 
 func (s *Server) resumePaid(id string) {

@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -252,6 +253,10 @@ async def _run_translation(task: TaskState, settings: SettingsModel) -> None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    # Task state is in memory, so task dirs left by a previous process are orphans.
+    for child in WORK_DIR.iterdir():
+        if child.is_dir() and re.fullmatch(r"[0-9a-f]{32}", child.name):
+            shutil.rmtree(child, ignore_errors=True)
     _get_semaphore()
     cleanup = asyncio.create_task(_cleanup_loop())
     try:

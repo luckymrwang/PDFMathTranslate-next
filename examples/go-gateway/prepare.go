@@ -299,8 +299,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Serialize quota check and order creation across prepared requests.
-	s.pay.startMu.Lock()
-	defer s.pay.startMu.Unlock()
+	s.pay.createMu.Lock()
+	defer s.pay.createMu.Unlock()
 	if s.pay.store.recentOrderCount(owner) >= 10 {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, 429, "操作过于频繁，请一分钟后重试")

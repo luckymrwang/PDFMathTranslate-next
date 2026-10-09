@@ -202,6 +202,9 @@ func (s *Server) handleTranslateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "订单已退款，翻译权益已撤销")
 		return
 	}
+	if order, ok := s.paidOrderForTask(taskID); ok && s.handlePaidTask(w, r, order, taskID, sub) {
+		return
+	}
 
 	upstream := "/v1/translate/" + taskID
 

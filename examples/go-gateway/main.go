@@ -49,6 +49,9 @@ func main() {
 		srv.pay = &PayService{cfg: payConfig, store: store, client: newXPayClient(cfg, payConfig),
 			sessions: &paySessions{keys: make(map[string]paySession)}}
 		for _, order := range store.all() {
+			for _, taskID := range order.TaskHistory {
+				srv.tasks.set(taskID, order.OpenID)
+			}
 			if order.TaskID != "" {
 				srv.tasks.set(order.TaskID, order.OpenID)
 			}
