@@ -110,6 +110,24 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	// wx.uploadFile uses a temporary basename; preserve the original display name separately.
+	displayName := filepath.Base(header.Filename)
+	if raw := r.FormValue("data"); raw != "" {
+		var metadata struct {
+			FileName string `json:"file_name"`
+		}
+		if len(raw) > 4096 || json.Unmarshal([]byte(raw), &metadata) != nil {
+			writeError(w, 400, "invalid file metadata")
+			return
+		}
+		if metadata.FileName != "" {
+			displayName = filepath.Base(strings.ReplaceAll(metadata.FileName, "\\", "/"))
+			if len(displayName) > 1024 || strings.ContainsAny(displayName, "\r\n\x00") || !strings.EqualFold(filepath.Ext(displayName), ".pdf") {
+				writeError(w, 400, "invalid PDF name")
+				return
+			}
+		}
+	}
 	if header.Size <= 0 || header.Size > 50<<20 || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
 		writeError(w, 400, "请选择不超过 50 MB 的 PDF")
 		return
@@ -182,7 +200,7 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 	}
 	expires := time.Now().Add(30 * time.Minute)
 	s.prepared.Lock()
-	s.prepared.files[id] = preparedPDF{owner, staged.Name(), filepath.Base(header.Filename),
+	s.prepared.files[id] = preparedPDF{owner, staged.Name(), displayName,
 		hex.EncodeToString(hash.Sum(nil)), result.Pages, expires}
 	s.prepared.Unlock()
 	keep = true

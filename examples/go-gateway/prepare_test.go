@@ -41,6 +41,7 @@ func TestPreparedFileOrderReuseAndOwnership(t *testing.T) {
 	mw := multipart.NewWriter(&body)
 	part, _ := mw.CreateFormFile("file", "sample.pdf")
 	part.Write([]byte("%PDF-test"))
+	mw.WriteField("data", `{"file_name":"原始文档.pdf"}`)
 	mw.Close()
 	r := ownRequest("POST", "/pay/prepare", "owner", &body)
 	r.Header.Set("Content-Type", mw.FormDataContentType())
@@ -80,6 +81,9 @@ func TestPreparedFileOrderReuseAndOwnership(t *testing.T) {
 	}
 	orders := s.pay.store.all()
 	for _, order := range orders {
+		if order.Name != "原始文档.pdf" {
+			t.Fatal("original PDF name lost", order.Name)
+		}
 		if order.Quantity != 16 || order.Total != 160 {
 			t.Fatal("client changed pricing")
 		}
