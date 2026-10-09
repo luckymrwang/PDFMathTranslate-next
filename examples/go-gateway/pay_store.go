@@ -153,6 +153,21 @@ func (s *OrderStore) all() []PayOrder {
 	return out
 }
 
+// Bound bursts of new orders instead of permanently locking out a user who
+// has old unfinished test orders. Historical orders stay available for proof.
+func (s *OrderStore) recentOrderCount(owner string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := time.Now().Add(-time.Minute).Unix()
+	count := 0
+	for _, order := range s.orders {
+		if order.OpenID == owner && order.CreatedAt >= cutoff {
+			count++
+		}
+	}
+	return count
+}
+
 func (s *OrderStore) update(id string, change func(*PayOrder) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

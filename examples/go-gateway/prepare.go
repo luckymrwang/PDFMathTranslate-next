@@ -269,14 +269,9 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 	// Serialize quota check and order creation across prepared requests.
 	s.pay.startMu.Lock()
 	defer s.pay.startMu.Unlock()
-	pending := 0
-	for _, order := range s.pay.store.all() {
-		if order.OpenID == owner && order.State == "pending" {
-			pending++
-		}
-	}
-	if pending >= 10 {
-		writeError(w, 429, "待支付订单过多，请先处理已有订单")
+	if s.pay.store.recentOrderCount(owner) >= 10 {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, 429, "操作过于频繁，请一分钟后重试")
 		return
 	}
 	product, price := s.pay.cfg.EnhancedProduct, s.pay.cfg.EnhancedPrice

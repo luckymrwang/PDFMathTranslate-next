@@ -21,6 +21,15 @@ type XPayClient struct {
 	expires                           time.Time
 }
 
+type wechatAPIError struct {
+	Operation string
+	Code      int
+}
+
+func (e *wechatAPIError) Error() string {
+	return fmt.Sprintf("wechat %s rejected (code %d)", e.Operation, e.Code)
+}
+
 func newXPayClient(cfg *Config, pay *PayConfig) *XPayClient {
 	return &XPayClient{AppID: cfg.AppID, AppSecret: cfg.AppSecret, AppKey: pay.AppKey,
 		BaseURL: "https://api.weixin.qq.com", HTTP: &http.Client{Timeout: 10 * time.Second}}
@@ -49,7 +58,13 @@ func (c *XPayClient) accessToken(ctx context.Context) (string, error) {
 		Expires int    `json:"expires_in"`
 		ErrCode int    `json:"errcode"`
 	}
-	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out) != nil || out.Token == "" || out.Expires <= 60 || out.ErrCode != 0 {
+	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out) != nil {
+		return "", errors.New("wechat access token returned invalid response")
+	}
+	if out.ErrCode != 0 {
+		return "", &wechatAPIError{Operation: "stable_token", Code: out.ErrCode}
+	}
+	if out.Token == "" || out.Expires <= 60 {
 		return "", fmt.Errorf("wechat access token rejected (code %d)", out.ErrCode)
 	}
 	c.token = out.Token
@@ -91,7 +106,7 @@ func (c *XPayClient) call(ctx context.Context, path string, body []byte, target 
 			continue
 		}
 		if status.Code != 0 {
-			return fmt.Errorf("wechat payment error code %d", status.Code)
+			return &wechatAPIError{Operation: path, Code: status.Code}
 		}
 		return json.Unmarshal(raw, target)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
@@ -126,14 +127,9 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
-	pending := 0
-	for _, order := range s.pay.store.all() {
-		if order.OpenID == openid && order.State == "pending" {
-			pending++
-		}
-	}
-	if pending >= 10 {
-		writeError(w, 429, "待支付订单过多，请先处理已有订单")
+	if s.pay.store.recentOrderCount(openid) >= 10 {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, 429, "操作过于频繁，请一分钟后重试")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 51<<20)
@@ -306,6 +302,15 @@ func (s *Server) handlePayQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if order.State == "pending" && time.Now().Unix()-order.LastQuery >= 10 {
 		if err := s.reconcileOrder(r.Context(), order.ID); err != nil {
+			log.Printf("virtual payment query failed (order=%s): %v", order.ID, err)
+			var apiErr *wechatAPIError
+			if errors.As(err, &apiErr) {
+				writeJSON(w, 502, map[string]any{
+					"error":             fmt.Sprintf("微信查单失败（错误码 %d），请检查服务器配置", apiErr.Code),
+					"wechat_error_code": apiErr.Code,
+				})
+				return
+			}
 			writeError(w, 502, "微信查单暂不可用，请稍后重试")
 			return
 		}
