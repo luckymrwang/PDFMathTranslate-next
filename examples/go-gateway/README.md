@@ -105,6 +105,7 @@ wx.login({
 | `GET` | `/api/engines` | 返回可用引擎名称列表，不含密钥 |
 | `POST` | `/api/engines/check` | 后台检查选中引擎；Python 成功结果缓存 5 分钟 |
 | `POST` | `/pay/prepare` | 提前上传 PDF 并读取页数，返回用户绑定的 file_token、page_count、expires_at |
+| `POST` | `/pay/prepare/order` | 重新下单时复用已关闭/退款订单的服务器 PDF；JSON 参数 order_id，返回新的文件凭证及原页数，不创建订单 |
 | `POST` | `/pay/order/prepared` | JSON 提交 file_token、engine、lang_in、lang_out；复用文件创建订单 |
 | `POST` | `/api/translate` | `multipart/form-data`（`file` + `data` JSON，PDF 最大 50 MB），返回 `{ "id": "<taskID>" }` |
 | `GET` | `/api/translate/{id}` | 查询任务状态 |

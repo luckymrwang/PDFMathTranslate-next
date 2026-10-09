@@ -137,18 +137,89 @@ async function run() {
   api.listPayOrders = async () => ({ orders: [{ id: 'cancelled-order', name: 'temporary.pdf',
     state: orderState, engine: 'Bing', lang_in: 'en', lang_out: 'zh', created_at: 1 }] })
   await page.loadOrders()
-  assert.equal(page.data.recentOrders[0].label, '支付操作已取消')
+  assert.equal(page.data.recentOrders.length, 0, 'Unpaid orders must not appear in recent translations')
+  orderState = 'paid'
+  await page.loadOrders()
   assert.equal(page.data.recentOrders[0].name, 'Original.pdf')
   let notice
   sandbox.wx.showToast = ({ title }) => { notice = title }
   api.queryPayOrder = async () => { orderState = 'closed'; return { id: 'cancelled-order', state: 'closed' } }
   const before = navigations
   await page.openPaidOrder({ currentTarget: { dataset: { index: 0 } } })
-  assert.equal(page.data.recentOrders[0].label, '已关闭')
+  assert.equal(page.data.recentOrders.length, 0, 'Closed orders must leave the homepage')
   assert.ok(notice.includes('订单已关闭'))
   assert.ok(!notice.includes('退款'))
   assert.equal(navigations, before, 'Cancelled/closed orders cannot start translation')
   assert.equal(page.checkingOrder, false)
+  let reusedPath, expiredPrompt
+  let fileInfo = ({ filePath, success }) => { reusedPath = filePath; success({ size: 2048 }) }
+  sandbox.wx.getFileSystemManager = () => ({ getFileInfo: args => fileInfo(args) })
+  api.preparePdf = async () => ({ file_token: 'reorder-file', page_count: 16, expires_at: Date.now() / 1000 + 1800 })
+  api.warmEngine = async () => ({ ready: true })
+  page.data.engines = ['GPT-6']
+  page.data.engine = 'GPT-6'
+  page.availableEngines = new Set(['GPT-6'])
+  page.data.countingPages = false
+  page.data.paying = false
+  const createdBeforeRestore = orderCreations
+  await page.restoreReorderFile({ name: 'Original.pdf', filePath: 'cached.pdf', engine: 'GPT-6' }, Promise.resolve())
+  assert.equal(reusedPath, 'cached.pdf')
+  assert.equal(page.data.paymentSheet, true)
+  assert.equal(page.data.orderReady, true)
+  assert.equal(page.paymentIntent.fileToken, 'reorder-file')
+  assert.equal(page.quotedJob, null, 'Old order credentials must not be reused')
+  assert.equal(page.payData, null)
+  assert.equal(orderCreations, createdBeforeRestore, 'Restoring a file cannot create or pay an order')
+  sandbox.wx.showModal = data => { expiredPrompt = data }
+  fileInfo = ({ fail }) => fail({ errMsg: 'file not found' })
+  await page.restoreReorderFile({ name: 'Expired.pdf', filePath: 'gone.pdf', engine: 'GPT-6' }, Promise.resolve())
+  assert.equal(expiredPrompt.confirmText, '选择文件')
+  assert.ok(expiredPrompt.content.includes('Expired.pdf'))
+  assert.equal(orderCreations, createdBeforeRestore)
+  let serverPrepares = 0, duplicateUploads = 0, localChecks = 0
+  api.prepareOrderPdf = async id => {
+    assert.equal(id, 'old-server-order')
+    serverPrepares++
+    return { file_token: 'server-reuse-' + serverPrepares, page_count: 16, file_name: 'Original.pdf', file_size: 2048, expires_at: Date.now() / 1000 + 1800 }
+  }
+  api.preparePdf = async () => { duplicateUploads++; throw new Error('Unexpected PDF upload') }
+  fileInfo = () => { localChecks++; throw new Error('Unexpected local file check') }
+  page.data.countingPages = false
+  await page.restoreReorderFile({ id: 'old-server-order', name: 'Original.pdf', engine: 'GPT-6' }, Promise.resolve())
+  assert.equal(serverPrepares, 1)
+  assert.equal(duplicateUploads, 0)
+  assert.equal(localChecks, 0)
+  assert.equal(page.data.paymentSheet, true)
+  assert.equal(page.data.orderReady, true)
+  assert.equal(page.paymentIntent.fileToken, 'server-reuse-1')
+  page.preparedFile.expires_at = 0
+  await page.prepareSelectedFile()
+  assert.equal(serverPrepares, 2, 'Expired server credentials renew without uploading')
+  assert.equal(duplicateUploads, 0)
+  assert.equal(orderCreations, createdBeforeRestore)
+  api.prepareOrderPdf = async () => { throw Object.assign(new Error('Missing server file'), { statusCode: 410 }) }
+  fileInfo = ({ success }) => success({ size: 2048 })
+  api.preparePdf = async () => { duplicateUploads++; return { file_token: 'fallback-upload', page_count: 16, expires_at: Date.now() / 1000 + 1800 } }
+  await page.restoreReorderFile({ id: 'old-server-order', name: 'Original.pdf', filePath: 'fallback.pdf', engine: 'GPT-6' }, Promise.resolve())
+  assert.equal(duplicateUploads, 1, 'Only missing server files fall back to a local upload')
+  assert.equal(page.sourceOrderID, null)
+  assert.equal(page.paymentIntent.fileToken, 'fallback-upload')
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'pages/history/history.js'), 'utf8'), { ...sandbox })
+  page.setData = values => Object.assign(page.data, values)
+  page.alive = true
+  await page.loadOrders()
+  assert.equal(page.data.orders[0].label, '已关闭')
+  assert.equal(page.data.orders[0].canReorder, true)
+  assert.equal(page.data.orders[0].name, 'Original.pdf')
+  let relaunched = false
+  sandbox.wx.reLaunch = () => { relaunched = true }
+  page.reorder({ currentTarget: { dataset: { index: 0 } } })
+  assert.equal(relaunched, true)
+  assert.equal(app.globalData.translationReorder.id, 'cancelled-order')
+  orderState = 'pending'
+  await page.loadOrders()
+  assert.equal(page.data.orders[0].label, '支付操作已取消')
+  assert.equal(page.data.orders[0].canReorder, false, 'Pending payment proof must be resolved before repurchase')
   console.log('PASS: payment proof, lifecycle, upload reuse, stable test amounts, prefetch, retry')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

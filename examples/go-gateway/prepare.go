@@ -144,14 +144,28 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 		s.prepared.files = make(map[string]preparedPDF)
 	}
 	count := 0
-	for _, f := range s.prepared.files {
+	oldestID := ""
+	var oldestExpiry time.Time
+	for key, f := range s.prepared.files {
 		if f.Owner == owner {
 			count++
+			// Completed preparations are replaceable cache entries, not active uploads.
+			if f.Path != "" && (oldestID == "" || f.Expires.Before(oldestExpiry)) {
+				oldestID, oldestExpiry = key, f.Expires
+			}
+		}
+	}
+	if count >= 5 && oldestID != "" {
+		// Paid orders have their own hard links; eviction cannot remove their PDFs.
+		old := s.prepared.files[oldestID]
+		if err := os.Remove(old.Path); err == nil || os.IsNotExist(err) {
+			delete(s.prepared.files, oldestID)
+			count--
 		}
 	}
 	if count >= 5 || len(s.prepared.files) >= 100 {
 		s.prepared.Unlock()
-		writeError(w, 429, "准备中的文件过多，请稍后再试")
+		writeError(w, 429, "同时上传的文件过多，请等待当前上传完成后重试")
 		return
 	}
 	s.prepared.files[id] = preparedPDF{Owner: owner}

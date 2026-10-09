@@ -70,6 +70,7 @@ func main() {
 	mux.Handle("/api/engines", srv.authRequired(http.HandlerFunc(srv.handleEngines)))
 	mux.Handle("/api/engines/check", srv.authRequired(http.HandlerFunc(srv.handleEngineCheck)))
 	mux.Handle("/pay/prepare", srv.authRequired(http.HandlerFunc(srv.handlePreparePDF)))
+	mux.Handle("/pay/prepare/order", srv.authRequired(http.HandlerFunc(srv.handleRepreparePDF)))
 	mux.Handle("/pay/order/prepared", srv.authRequired(http.HandlerFunc(srv.handlePreparedOrder)))
 	mux.Handle("/api/translate", srv.authRequired(http.HandlerFunc(srv.handleTranslateSubmit)))
 	mux.Handle("/api/translate/", srv.authRequired(http.HandlerFunc(srv.handleTranslateTask)))

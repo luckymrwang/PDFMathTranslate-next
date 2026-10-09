@@ -8,9 +8,75 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestPrepareEvictsCompletedCacheButProtectsUploadsAndOrderFiles(t *testing.T) {
+	s := testPayServer(t)
+	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]int{"page_count": 1})
+	}))
+	defer python.Close()
+	s.pdf2zh = NewPdf2zhClient(python.URL)
+	upload := func() *httptest.ResponseRecorder {
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		part, _ := mw.CreateFormFile("file", "sample.pdf")
+		part.Write([]byte("%PDF-test"))
+		mw.Close()
+		r := ownRequest("POST", "/pay/prepare", "owner", &body)
+		r.Header.Set("Content-Type", mw.FormDataContentType())
+		w := httptest.NewRecorder()
+		s.handlePreparePDF(w, r)
+		return w
+	}
+	first := upload()
+	if first.Code != 200 {
+		t.Fatal(first.Code, first.Body.String())
+	}
+	var result struct {
+		Token string `json:"file_token"`
+	}
+	json.Unmarshal(first.Body.Bytes(), &result)
+	oldPath := s.prepared.files[result.Token].Path
+	orderPath := filepath.Join(s.pay.store.dir, "uploads", ".order-test.pdf")
+	if err := os.Link(oldPath, orderPath); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 7; i++ {
+		w := upload()
+		if w.Code != 200 {
+			t.Fatal("repeat preparation blocked", w.Code, w.Body.String())
+		}
+	}
+	if len(s.prepared.files) != 5 {
+		t.Fatal("cache no longer bounded")
+	}
+	if _, ok := s.prepared.files[result.Token]; ok {
+		t.Fatal("oldest credential not evicted")
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatal("old cache file not removed", err)
+	}
+	if raw, err := os.ReadFile(orderPath); err != nil || string(raw) != "%PDF-test" {
+		t.Fatal("order PDF lost", err)
+	}
+	// All slots are truly in-flight: no upload may be evicted to bypass the limit.
+	s.prepared.Lock()
+	for id, file := range s.prepared.files {
+		os.Remove(file.Path)
+		delete(s.prepared.files, id)
+	}
+	for _, id := range []string{"a", "b", "c", "d", "e"} {
+		s.prepared.files[id] = preparedPDF{Owner: "owner"}
+	}
+	s.prepared.Unlock()
+	if w := upload(); w.Code != 429 {
+		t.Fatal("active upload cap bypassed", w.Code)
+	}
+}
 
 func TestPreparedFileOrderReuseAndOwnership(t *testing.T) {
 	s := testPayServer(t)
