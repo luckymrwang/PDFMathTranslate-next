@@ -43,7 +43,8 @@ async function run() {
       return {}
     },
     Page: value => { page = value },
-    wx: { navigateTo: () => navigations++, showToast() {} },
+    wx: { navigateTo: () => navigations++, showToast() {},
+      getStorageSync: () => ({}), setStorageSync() {} },
     getApp: () => app,
     setTimeout: callback => { callback(); return 0 },
     console,
@@ -85,6 +86,44 @@ async function run() {
   complete({ file_token: 'stale', page_count: 99, expires_at: Date.now() / 1000 + 1800 })
   await assert.rejects(stale, /文件已变更/)
   assert.equal(page.preparedFile, null, 'Removed file must not return from an old request')
-  console.log('PASS: versions, integer fen, signed payload, server payment proof, lifecycle')
+  page.data.filePath = 'ready.pdf'
+  page.data.fileName = 'ready.pdf'
+  page.data.mode = 'enhanced'
+  page.data.engine = 'GPT-6'
+  page.data.orderReady = false
+  page.data.countingPages = false
+  page.data.paying = false
+  page.preparedFile = { path: 'ready.pdf', page_count: 16, file_token: 'ready',
+    expires_at: Date.now() / 1000 + 1800 }
+  let configRequests = 0, finishOrder
+  api.getPayConfig = async () => { configRequests++; return { enabled: true } }
+  api.createPreparedOrder = () => new Promise(resolve => { finishOrder = resolve })
+  const configWarmup = page.getPaymentConfig()
+  await configWarmup
+  const opening = page.openPaymentSheet()
+  assert.equal(page.data.paymentTotal, '8.00', 'Show the page test amount as soon as page count is known')
+  assert.equal(page.data.orderReady, false, 'An early display amount does not enable payment')
+  for (let tick = 0; tick < 8 && !finishOrder; tick++) await Promise.resolve()
+  assert.equal(configRequests, 1, 'Reuse the background payment config check')
+  assert.equal(typeof finishOrder, 'function')
+  finishOrder({ order: { id: 'quote-1', quantity: 16, unit_price_fen: 20, total_fen: 320 },
+    payData: { signData: 'server-payload' } })
+  await opening
+  assert.equal(page.data.unitPrice, '0.50')
+  assert.equal(page.data.paymentTotal, '8.00', 'Keep display test amount stable when backend test pricing differs')
+  assert.equal(page.payData.signData, 'server-payload', 'Keep the actual server payment payload unchanged')
+  assert.equal(page.data.orderReady, true)
+  page.closePaymentSheet()
+  api.createPreparedOrder = async () => { throw new Error('测试失败') }
+  await page.openPaymentSheet()
+  assert.equal(page.data.paymentError, '测试失败')
+  assert.equal(page.data.countingPages, false)
+  assert.equal(page.data.orderReady, false)
+  api.createPreparedOrder = async () => ({ order: { id: 'retry-quote', quantity: 16 },
+    payData: { signData: 'retry' } })
+  await page.confirmTranslation()
+  assert.equal(page.data.orderReady, true, 'Retry should prepare an order, not launch payment')
+  assert.equal(page.data.paymentError, '')
+  console.log('PASS: payment proof, lifecycle, upload reuse, stable test amounts, prefetch, retry')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })
