@@ -131,6 +131,24 @@ async function run() {
   await page.confirmTranslation()
   assert.equal(page.quotedJob.orderID, 'retry-quote')
   assert.equal(page.data.paymentError, '')
+  const storedJobs = { 'cancelled-order': { name: 'Original.pdf', paymentCancelledAt: Date.now() } }
+  sandbox.wx.getStorageSync = key => key === 'virtualpay_pending_jobs' ? storedJobs : []
+  let orderState = 'pending'
+  api.listPayOrders = async () => ({ orders: [{ id: 'cancelled-order', name: 'temporary.pdf',
+    state: orderState, engine: 'Bing', lang_in: 'en', lang_out: 'zh', created_at: 1 }] })
+  await page.loadOrders()
+  assert.equal(page.data.recentOrders[0].label, '支付操作已取消')
+  assert.equal(page.data.recentOrders[0].name, 'Original.pdf')
+  let notice
+  sandbox.wx.showToast = ({ title }) => { notice = title }
+  api.queryPayOrder = async () => { orderState = 'closed'; return { id: 'cancelled-order', state: 'closed' } }
+  const before = navigations
+  await page.openPaidOrder({ currentTarget: { dataset: { index: 0 } } })
+  assert.equal(page.data.recentOrders[0].label, '已关闭')
+  assert.ok(notice.includes('订单已关闭'))
+  assert.ok(!notice.includes('退款'))
+  assert.equal(navigations, before, 'Cancelled/closed orders cannot start translation')
+  assert.equal(page.checkingOrder, false)
   console.log('PASS: payment proof, lifecycle, upload reuse, stable test amounts, prefetch, retry')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })
