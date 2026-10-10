@@ -293,8 +293,8 @@ func relayResponse(w http.ResponseWriter, resp *http.Response) {
 // handleTranslateResult archives a finished task's PDFs to object storage and
 // returns time-limited presigned download URLs. Archiving happens once per task.
 func (s *Server) handleTranslateResult(w http.ResponseWriter, r *http.Request, taskID string) {
-	if s.storage == nil {
-		writeError(w, http.StatusNotImplemented, "object storage not configured; use /mono and /dual to download directly")
+	if s.storage == nil || s.storage.cfg.Proxy {
+		writeError(w, http.StatusNotImplemented, "use /mono and /dual to download through the gateway")
 		return
 	}
 

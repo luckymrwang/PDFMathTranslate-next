@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,13 +28,28 @@ type S3Config struct {
 	SecretKey string // secret
 	PathStyle bool   // path-style URLs (bucket in path); true for MinIO/most
 	URLTTL    time.Duration
-	host      string
-	scheme    string
+	// Proxy streams downloads through the gateway instead of handing out
+	// presigned URLs (whose host must be whitelisted in the mini-program).
+	Proxy    bool
+	Provider string
+	host     string
+	scheme   string
 }
+
+var (
+	r2AccountPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	r2BucketPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+)
 
 // LoadS3Config reads object-store settings from the environment. The second
 // return value reports whether storage is configured (all required keys set).
+// R2_* variables take precedence over the generic OSS_* ones.
 func LoadS3Config() (*S3Config, bool) {
+	if cfg, ok, err := loadR2Config(); err != nil {
+		log.Printf("cloudflare r2 config ignored: %v", err)
+	} else if ok {
+		return cfg, true
+	}
 	endpoint := os.Getenv("OSS_ENDPOINT")
 	bucket := os.Getenv("OSS_BUCKET")
 	ak := os.Getenv("OSS_ACCESS_KEY")
@@ -54,10 +71,51 @@ func LoadS3Config() (*S3Config, bool) {
 		SecretKey: sk,
 		PathStyle: getenv("OSS_PATH_STYLE", "true") != "false",
 		URLTTL:    parseDurationSeconds("OSS_URL_TTL", time.Hour),
+		Proxy:     getenv("STORAGE_DOWNLOAD_MODE", "presign") == "proxy",
+		Provider:  "s3",
 		host:      u.Host,
 		scheme:    u.Scheme,
 	}
 	return cfg, true
+}
+
+// loadR2Config builds the Cloudflare R2 S3 endpoint from the account id.
+func loadR2Config() (*S3Config, bool, error) {
+	account := strings.ToLower(os.Getenv("R2_ACCOUNT_ID"))
+	bucket := os.Getenv("R2_BUCKET")
+	ak := os.Getenv("R2_ACCESS_KEY_ID")
+	sk := os.Getenv("R2_SECRET_ACCESS_KEY")
+	if account == "" && bucket == "" && ak == "" && sk == "" {
+		return nil, false, nil
+	}
+	if account == "" || bucket == "" || ak == "" || sk == "" {
+		return nil, false, fmt.Errorf("R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY are all required")
+	}
+	if !r2AccountPattern.MatchString(account) || !r2BucketPattern.MatchString(bucket) {
+		return nil, false, fmt.Errorf("invalid R2 account id or bucket name")
+	}
+	host := account + ".r2.cloudflarestorage.com"
+	switch jurisdiction := os.Getenv("R2_JURISDICTION"); jurisdiction {
+	case "":
+	case "eu", "fedramp":
+		host = account + "." + jurisdiction + ".r2.cloudflarestorage.com"
+	default:
+		return nil, false, fmt.Errorf("unsupported R2_JURISDICTION")
+	}
+	return &S3Config{
+		Endpoint:  "https://" + host,
+		Region:    "auto",
+		Bucket:    bucket,
+		AccessKey: ak,
+		SecretKey: sk,
+		PathStyle: true,
+		URLTTL:    parseDurationSeconds("OSS_URL_TTL", time.Hour),
+		// R2 S3 hosts cannot be ICP-filed, so mini-programs cannot download from them directly.
+		Proxy:    getenv("STORAGE_DOWNLOAD_MODE", "proxy") != "presign",
+		Provider: "r2",
+		host:     host,
+		scheme:   "https",
+	}, true, nil
 }
 
 func parseDurationSeconds(key string, fallback time.Duration) time.Duration {
@@ -79,7 +137,7 @@ type S3Client struct {
 }
 
 func NewS3Client(cfg *S3Config) *S3Client {
-	return &S3Client{cfg: cfg, HTTP: &http.Client{Timeout: 60 * time.Second}}
+	return &S3Client{cfg: cfg, HTTP: &http.Client{Timeout: 5 * time.Minute}}
 }
 
 // objectPath builds the canonical URI path for a key (path- or virtual-style).
@@ -148,6 +206,23 @@ func (c *S3Client) PutObject(ctx context.Context, key, contentType string, body 
 		return fmt.Errorf("s3 put %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// GetObject downloads an object; the caller must close the response body.
+func (c *S3Client) GetObject(ctx context.Context, key string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.PresignGetURL(key), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("s3 get %d", resp.StatusCode)
+	}
+	return resp, nil
 }
 
 // PresignGetURL returns a time-limited GET URL for the object (SigV4 query signing).

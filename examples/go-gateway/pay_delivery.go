@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -173,13 +174,50 @@ func (s *Server) archivePaidResult(ctx context.Context, order PayOrder) error {
 	if mono == "" && dual == "" {
 		return errNoResult
 	}
-	return s.pay.store.update(order.ID, func(current *PayOrder) error {
+	err = s.pay.store.update(order.ID, func(current *PayOrder) error {
 		if current.State == "refunded" {
 			return errors.New("order refunded")
 		}
 		current.MonoFile, current.DualFile, current.Delivery = mono, dual, "archived"
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if err := s.uploadArchived(ctx, order.ID); err != nil {
+		log.Printf("result upload to object storage deferred (order=%s): %v", order.ID, err)
+	}
+	return nil
+}
+
+// uploadArchived moves archived results into object storage, then frees the
+// local copies. Callers must hold the order lock.
+func (s *Server) uploadArchived(ctx context.Context, id string) error {
+	order, ok := s.pay.store.get(id)
+	if s.storage == nil || !ok || order.Delivery != "archived" || order.MonoKey != "" || order.DualKey != "" {
+		return nil
+	}
+	mono, err := s.uploadResult(ctx, order.MonoFile, s.resultKey(order.OpenID, order.ID, "mono"))
+	if err != nil {
+		return err
+	}
+	dual, err := s.uploadResult(ctx, order.DualFile, s.resultKey(order.OpenID, order.ID, "dual"))
+	if err != nil {
+		return err
+	}
+	if err := s.pay.store.update(id, func(current *PayOrder) error {
+		current.MonoKey, current.DualKey = mono, dual
+		current.MonoFile, current.DualFile = "", ""
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, path := range []string{order.MonoFile, order.DualFile} {
+		if path != "" {
+			_ = os.Remove(path)
+		}
+	}
+	return nil
 }
 
 // saveResult copies one result PDF from the worker; "" means the variant does not exist.
@@ -247,9 +285,26 @@ func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order Pa
 	case r.Method == http.MethodGet && sub == "":
 		s.writePaidStatus(w, r, order, taskID)
 	case r.Method == http.MethodGet && (sub == "mono" || sub == "dual") && order.Delivery == "archived":
-		path := order.MonoFile
+		path, key := order.MonoFile, order.MonoKey
 		if sub == "dual" {
-			path = order.DualFile
+			path, key = order.DualFile, order.DualKey
+		}
+		filename := fmt.Sprintf("attachment; filename=%q", order.ID+"-"+sub+".pdf")
+		if path == "" && key != "" && s.storage != nil {
+			resp, err := s.storage.GetObject(r.Context(), key)
+			if err != nil {
+				log.Printf("object storage download failed (order=%s): %v", order.ID, err)
+				writeError(w, http.StatusBadGateway, "result storage unavailable")
+				return true
+			}
+			defer resp.Body.Close()
+			w.Header().Set("Content-Type", "application/pdf")
+			w.Header().Set("Content-Disposition", filename)
+			if resp.ContentLength >= 0 {
+				w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+			}
+			_, _ = io.Copy(w, resp.Body)
+			return true
 		}
 		file, err := os.Open(path)
 		if path == "" || err != nil {
@@ -263,7 +318,7 @@ func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order Pa
 			return true
 		}
 		w.Header().Set("Content-Type", "application/pdf")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", order.ID+"-"+sub+".pdf"))
+		w.Header().Set("Content-Disposition", filename)
 		http.ServeContent(w, r, "", info.ModTime(), file)
 	case r.Method == http.MethodGet && sub == "result":
 		s.writePaidResult(w, r, order)
@@ -278,10 +333,10 @@ func (s *Server) writePaidStatus(w http.ResponseWriter, r *http.Request, order P
 	case "archived":
 		out := map[string]any{"id": taskID, "state": "finished", "stage": "", "progress": 100.0,
 			"mono_url": nil, "dual_url": nil}
-		if order.MonoFile != "" {
+		if order.MonoFile != "" || order.MonoKey != "" {
 			out["mono_url"] = "/api/translate/" + taskID + "/mono"
 		}
-		if order.DualFile != "" {
+		if order.DualFile != "" || order.DualKey != "" {
 			out["dual_url"] = "/api/translate/" + taskID + "/dual"
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -303,9 +358,13 @@ func (s *Server) writePaidStatus(w http.ResponseWriter, r *http.Request, order P
 		writeJSON(w, http.StatusOK, recovering)
 		return
 	}
-	resp, err := s.pdf2zh.Request(r.Context(), http.MethodGet, "/v1/translate/"+order.TaskID)
+	// Fail fast so the client sees an error instead of its own request timeout.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	resp, err := s.pdf2zh.Request(ctx, http.MethodGet, "/v1/translate/"+order.TaskID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "translation service unavailable")
+		log.Printf("translation status unavailable (order=%s, task=%s): %v", order.ID, order.TaskID, err)
+		writeError(w, http.StatusGatewayTimeout, "translation service unavailable")
 		return
 	}
 	defer resp.Body.Close()
@@ -323,6 +382,7 @@ func (s *Server) writePaidStatus(w http.ResponseWriter, r *http.Request, order P
 			return
 		}
 	} else if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		log.Printf("translation status error (order=%s, task=%s): HTTP %d", order.ID, order.TaskID, resp.StatusCode)
 		writeError(w, http.StatusBadGateway, "translation service unavailable")
 		return
 	}
@@ -334,31 +394,27 @@ func (s *Server) writePaidResult(w http.ResponseWriter, r *http.Request, order P
 		writeError(w, http.StatusConflict, "task not finished")
 		return
 	}
-	if s.storage == nil {
-		writeError(w, http.StatusNotImplemented, "object storage not configured; use /mono and /dual to download directly")
+	if s.storage == nil || s.storage.cfg.Proxy {
+		writeError(w, http.StatusNotImplemented, "use /mono and /dual to download through the gateway")
 		return
 	}
 	if order.MonoKey == "" && order.DualKey == "" {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		defer cancel()
-		mono, err := s.uploadResult(ctx, order.MonoFile, s.resultKey(order.OpenID, order.ID, "mono"))
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to archive result")
+		unlock, ok := s.pay.locks.acquire(order.ID, false)
+		if ok {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+			err := s.uploadArchived(ctx, order.ID)
+			cancel()
+			unlock()
+			if err != nil {
+				log.Printf("result upload to object storage failed (order=%s): %v", order.ID, err)
+			}
+		}
+		order, _ = s.pay.store.get(order.ID)
+		if order.MonoKey == "" && order.DualKey == "" {
+			// Client falls back to downloading through the gateway.
+			writeError(w, http.StatusNotImplemented, "result not in object storage yet")
 			return
 		}
-		dual, err := s.uploadResult(ctx, order.DualFile, s.resultKey(order.OpenID, order.ID, "dual"))
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to archive result")
-			return
-		}
-		if err := s.pay.store.update(order.ID, func(current *PayOrder) error {
-			current.MonoKey, current.DualKey = mono, dual
-			return nil
-		}); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to archive result")
-			return
-		}
-		order.MonoKey, order.DualKey = mono, dual
 	}
 	s.writeResultURLs(w, order.MonoKey, order.DualKey)
 }

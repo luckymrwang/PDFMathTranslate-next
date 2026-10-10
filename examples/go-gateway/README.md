@@ -48,6 +48,21 @@ Google、Bing 默认可用。下列环境变量配置后会向小程序开放对
 | `OSS_REGION` | 否 | `us-east-1` | 区域，如 `cn-hangzhou` |
 | `OSS_PATH_STYLE` | 否 | `true` | path-style URL（MinIO 用 true；OSS 虚拟主机风格设 `false`） |
 | `OSS_URL_TTL` | 否 | `3600` | 预签名链接有效期（秒） |
+| `STORAGE_DOWNLOAD_MODE` | 否 | OSS 为 `presign`，R2 为 `proxy` | `proxy`：经网关下载（`/result` 返回 501，小程序自动改走 `/mono`、`/dual`）；`presign`：返回预签名直链（存储域名须加入小程序 downloadFile 合法域名） |
+
+#### Cloudflare R2
+
+配置以下四项即启用 R2（优先于 `OSS_*`）。网关自动使用 `https://<账号ID>.r2.cloudflarestorage.com`、`region=auto`、path-style。R2 的 S3 域名无法备案、不能加入小程序合法域名，因此默认经网关代理下载。
+
+| 变量 | 必填 | 说明 |
+| --- | --- | --- |
+| `R2_ACCOUNT_ID` | 是 | Cloudflare 账号 ID（32 位十六进制） |
+| `R2_BUCKET` | 是 | 存储桶名 |
+| `R2_ACCESS_KEY_ID` | 是 | R2 API 令牌的 Access Key ID（机密，建议仅授予该桶“对象读写”） |
+| `R2_SECRET_ACCESS_KEY` | 是 | R2 API 令牌的 Secret Access Key（机密） |
+| `R2_JURISDICTION` | 否 | `eu` 或 `fedramp`，桶建在对应辖区时填写 |
+
+付费订单翻译完成后，网关先把结果落盘到 `VIRTUALPAY_DATA_DIR/results/`，再上传到对象存储并删除本地副本；上传失败会保留本地文件，由对账任务每分钟重试。对象路径为 `results/<openid>/<订单号>-mono|dual.pdf`，可在 R2 控制台给 `results/` 配置生命周期规则自动过期。
 
 ## 运行
 

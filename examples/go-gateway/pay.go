@@ -284,6 +284,7 @@ func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
 	if start && r.Method == http.MethodPost {
 		taskID, err := s.startPaidOrder(r.Context(), id)
 		if err != nil {
+			log.Printf("paid translation start failed (order=%s, state=%s): %v", id, order.State, err)
 			writeError(w, 409, "订单尚未支付或翻译服务不可用，请稍后重试")
 			return
 		}
@@ -539,6 +540,16 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 		for _, order := range s.pay.store.all() {
 			if ctx.Err() != nil {
 				return
+			}
+			if order.Delivery == "archived" && s.storage != nil && order.MonoKey == "" && order.DualKey == "" {
+				if unlock, ok := s.pay.locks.acquire(order.ID, false); ok {
+					uploadCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+					if err := s.uploadArchived(uploadCtx, order.ID); err != nil {
+						log.Printf("result upload to object storage failed (order=%s): %v", order.ID, err)
+					}
+					cancel()
+					unlock()
+				}
 			}
 			if order.Delivery != "" {
 				continue

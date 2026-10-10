@@ -61,7 +61,7 @@ func main() {
 	}
 	if s3cfg, ok := LoadS3Config(); ok {
 		srv.storage = NewS3Client(s3cfg)
-		log.Printf("object storage enabled: bucket=%s endpoint=%s", s3cfg.Bucket, s3cfg.Endpoint)
+		log.Printf("object storage enabled: provider=%s bucket=%s endpoint=%s proxy_download=%t", s3cfg.Provider, s3cfg.Bucket, s3cfg.Endpoint, s3cfg.Proxy)
 	} else {
 		log.Printf("object storage not configured; result archiving disabled")
 	}
