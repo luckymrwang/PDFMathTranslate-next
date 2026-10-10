@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -180,6 +181,7 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 	}()
 	staged, err := os.CreateTemp(filepath.Join(s.pay.store.dir, "uploads"), ".prepare-*.pdf")
 	if err != nil {
+		log.Printf("prepare: cannot create staging file: %v", err)
 		writeError(w, 500, "无法保存文件")
 		return
 	}
@@ -198,6 +200,7 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 		err = staged.Close()
 	}
 	if err != nil {
+		log.Printf("prepare: cannot write staging file: %v", err)
 		writeError(w, 500, "无法保存文件")
 		return
 	}
@@ -209,6 +212,11 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 		Pages int `json:"page_count"`
 	}
 	if err != nil || json.Unmarshal(raw, &result) != nil || result.Pages < 1 || result.Pages > 1000 {
+		log.Printf("prepare: page inspection failed (pages=%d): %v", result.Pages, err)
+		if err != nil && err.Error() == "python service unavailable" {
+			writeError(w, 503, "翻译服务暂不可用，请稍后重试")
+			return
+		}
 		writeError(w, 422, "无法读取 PDF 页数")
 		return
 	}
