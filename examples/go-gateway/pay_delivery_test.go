@@ -124,6 +124,50 @@ func TestPaidOrderFailsAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestCancelledOrderHiddenButLatePaymentRevives(t *testing.T) {
+	s := testPayServer(t)
+	var paid sync.Mutex
+	status := 0
+	wx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/cgi-bin/stable_token" {
+			writeJSON(w, 200, map[string]any{"access_token": "token", "expires_in": 7200})
+			return
+		}
+		paid.Lock()
+		defer paid.Unlock()
+		if status == 0 {
+			writeJSON(w, 200, map[string]any{"errcode": 268490004})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"errcode": 0, "order": map[string]any{"order_id": "Tcancel", "wx_order_id": "wx-9",
+			"env_type": 1, "status": status, "order_fee": 50, "paid_fee": 50}})
+	}))
+	defer wx.Close()
+	s.pay.client = &XPayClient{AppKey: "app-key", BaseURL: wx.URL, HTTP: wx.Client()}
+	_ = s.pay.store.add(PayOrder{ID: "Tcancel", OpenID: "owner", State: "pending", Total: 50})
+
+	w := httptest.NewRecorder()
+	s.handlePayOrders(w, ownRequest("POST", "/pay/orders/Tcancel/cancel", "owner", nil))
+	if order, _ := s.pay.store.get("Tcancel"); w.Code != 200 || order.State != "closed" {
+		t.Fatalf("cancelled unpaid order not closed: %d %+v", w.Code, order)
+	}
+	w = httptest.NewRecorder()
+	s.handlePayOrders(w, ownRequest("GET", "/pay/orders", "owner", nil))
+	if strings.Contains(w.Body.String(), "Tcancel") {
+		t.Fatal("unpaid closed order listed")
+	}
+
+	paid.Lock()
+	status = 2
+	paid.Unlock()
+	if err := s.reconcileOrder(context.Background(), "Tcancel"); err != nil {
+		t.Fatal(err)
+	}
+	if order, _ := s.pay.store.get("Tcancel"); order.State != "paid" {
+		t.Fatalf("late payment not honoured: %+v", order)
+	}
+}
+
 func TestOrderLocksAreIndependent(t *testing.T) {
 	var locks orderLocks
 	unlockA, _ := locks.acquire("a", true)

@@ -18,6 +18,9 @@ import (
 // order is marked failed and needs a manual refund.
 const maxPaidAttempts = 3
 
+// Unpaid orders older than this are closed by reconciliation.
+const pendingOrderTTL = 30 * time.Minute
+
 var (
 	errSubmitConflict = errors.New("paid task requires recovery")
 	errNoResult       = errors.New("translation produced no PDF")

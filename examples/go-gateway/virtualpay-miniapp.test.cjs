@@ -40,6 +40,7 @@ async function run() {
       if (name === '../../config') return { demoMode: false }
       if (name === '../../utils/api') return api
       if (name === '../../utils/payment') return { ...payment, assertPaymentSupported() {}, pay: async () => ({}) }
+      if (name === '../../utils/order-status') return require(path.join(root, 'utils/order-status.js'))
       return {}
     },
     Page: value => { page = value },
@@ -218,8 +219,7 @@ async function run() {
   assert.equal(app.globalData.translationReorder.id, 'cancelled-order')
   orderState = 'pending'
   await page.loadOrders()
-  assert.equal(page.data.orders[0].label, '支付操作已取消')
-  assert.equal(page.data.orders[0].canReorder, false, 'Pending payment proof must be resolved before repurchase')
+  assert.equal(page.data.orders.length, 0, 'Payments the user cancelled are not listed as orders')
   console.log('PASS: payment proof, lifecycle, upload reuse, stable test amounts, prefetch, retry')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

@@ -34,7 +34,7 @@ func orderView(order PayOrder) map[string]any {
 	return map[string]any{"id": order.ID, "state": order.State, "quantity": order.Quantity,
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
-		"task_id": order.TaskID, "created_at": order.CreatedAt}
+		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt}
 }
 
 func paymentData(order PayOrder, appKey, sessionKey string) map[string]string {
@@ -251,7 +251,8 @@ func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
 		}
 		orders := make([]map[string]any, 0)
 		for _, order := range s.pay.store.all() {
-			if order.OpenID == openid {
+			// Unpaid closed orders (cancelled or abandoned payments) are not shown to users.
+			if order.OpenID == openid && !(order.State == "closed" && order.WxOrderID == "") {
 				orders = append(orders, orderView(order))
 			}
 		}
@@ -262,9 +263,22 @@ func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
 	if start {
 		id = strings.TrimSuffix(id, "/start")
 	}
+	cancelling := strings.HasSuffix(id, "/cancel")
+	if cancelling {
+		id = strings.TrimSuffix(id, "/cancel")
+	}
 	order, ok := s.pay.store.get(id)
 	if !ok || order.OpenID != openid {
 		writeError(w, 404, "订单不存在")
+		return
+	}
+	if cancelling && r.Method == http.MethodPost {
+		if err := s.closePendingOrder(r.Context(), id); err != nil {
+			writeError(w, 502, "暂时无法确认付款状态，请稍后刷新")
+			return
+		}
+		order, _ = s.pay.store.get(id)
+		writeJSON(w, 200, orderView(order))
 		return
 	}
 	if start && r.Method == http.MethodPost {
@@ -332,7 +346,7 @@ func (s *Server) grantOrder(id string, verified queriedOrder) error {
 			return errors.New("platform order identity mismatch")
 		}
 		// An unpaid closed order need not have a platform payment number.
-		if verified.Status == 6 && order.State == "pending" {
+		if verified.Status == 6 && (order.State == "pending" || order.State == "closed") {
 			order.State = "closed"
 			return nil
 		}
@@ -357,8 +371,32 @@ func (s *Server) grantOrder(id string, verified queriedOrder) error {
 			return errors.New("refunded order cannot be fulfilled")
 		}
 		order.WxOrderID = verified.WxID
-		if order.State == "pending" {
+		// A locally closed order the platform reports as paid was paid late; honour it.
+		if order.State == "pending" || order.State == "closed" {
 			order.State = "paid"
+		}
+		return nil
+	})
+}
+
+// closePendingOrder closes an unpaid order after a user cancel or timeout.
+// Network failures leave it pending; a later platform payment revives it.
+func (s *Server) closePendingOrder(ctx context.Context, id string) error {
+	order, ok := s.pay.store.get(id)
+	if !ok || order.State != "pending" {
+		return nil
+	}
+	verified, err := s.pay.client.query(ctx, order)
+	var apiErr *wechatAPIError
+	if err != nil && !(errors.As(err, &apiErr) && apiErr.Operation == "/xpay/query_order") {
+		return err
+	}
+	if err == nil && verified.Status != 0 && verified.Status != 1 && verified.Status != 6 {
+		return s.reconcileOrder(ctx, id)
+	}
+	return s.pay.store.update(id, func(current *PayOrder) error {
+		if current.State == "pending" {
+			current.State = "closed"
 		}
 		return nil
 	})
@@ -503,6 +541,14 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 				return
 			}
 			if order.Delivery != "" {
+				continue
+			}
+			if order.State == "pending" && time.Since(time.Unix(order.CreatedAt, 0)) > pendingOrderTTL {
+				checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				if err := s.closePendingOrder(checkCtx, order.ID); err != nil {
+					log.Printf("virtual payment expiry check failed (order=%s): %v", order.ID, err)
+				}
+				cancel()
 				continue
 			}
 			if queryWeChat && (order.State == "pending" || order.State == "paid" || order.State == "submitted") {
