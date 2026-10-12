@@ -99,7 +99,7 @@ class TranslateRequest(BaseModel):
     pool_max_workers: int | None = Field(default=DEFAULT_POOL_MAX_WORKERS)
     skip_image_translation: bool = Field(default=True)
     watermark_output_mode: Literal["watermarked", "no_watermark", "both"] = Field(
-        default="watermarked"
+        default="no_watermark"
     )
     translate_engine_settings: dict[str, Any] = Field(
         default_factory=lambda: {"translate_engine_type": "Google"}
