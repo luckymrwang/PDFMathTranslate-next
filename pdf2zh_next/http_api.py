@@ -188,17 +188,38 @@ def _build_settings(req: TranslateRequest, output_dir: Path) -> SettingsModel:
     return settings
 
 
+# BabelDOC emits English stage names; surface Chinese labels to clients.
+_STAGE_ZH = {
+    "Parse PDF and Create Intermediate Representation": "解析 PDF",
+    "DetectScannedFile": "检测扫描件",
+    "Parse Page Layout": "识别页面版面",
+    "Parse Paragraphs": "识别段落",
+    "Parse Formulas and Styles": "识别公式与样式",
+    "Parse Table": "识别表格",
+    "Remove Char Descent": "处理字符基线",
+    "Automatic Term Extraction": "自动提取术语",
+    "Translate Paragraphs": "翻译段落",
+    "Typesetting": "排版",
+    "Add Fonts": "嵌入字体",
+    "Subset font": "字体子集化",
+    "Generate drawing instructions": "生成绘制指令",
+    "Add Debug Information": "添加调试信息",
+    "Save PDF": "保存 PDF",
+}
+
+
 def _serialize_event(event: dict[str, Any], task: TaskState) -> dict[str, Any]:
     """Convert a babeldoc event into a JSON-safe dict and update task state."""
     etype = event.get("type")
 
     if etype in ("progress_start", "progress_update", "progress_end"):
+        stage = _STAGE_ZH.get(event.get("stage"), event.get("stage"))
         task.status = "running"
-        task.stage = event.get("stage", task.stage)
+        task.stage = stage
         task.progress = float(event.get("overall_progress", task.progress))
         return {
             "type": etype,
-            "stage": event.get("stage"),
+            "stage": stage,
             "overall_progress": event.get("overall_progress"),
             "part_index": event.get("part_index"),
             "total_parts": event.get("total_parts"),
