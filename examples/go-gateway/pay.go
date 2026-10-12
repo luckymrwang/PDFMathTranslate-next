@@ -297,7 +297,16 @@ func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
 		taskID, err := s.startPaidOrder(r.Context(), id)
 		if err != nil {
 			log.Printf("paid translation start failed (order=%s, state=%s): %v", id, order.State, err)
-			writeError(w, 409, "订单尚未支付或翻译服务不可用，请稍后重试")
+			current, _ := s.pay.store.get(id)
+			switch {
+			case current.Delivery == "failed":
+				writeError(w, 409, paidFailureMessage(current))
+			case current.State != "paid" && current.State != "submitted":
+				writeError(w, 409, "订单尚未支付")
+			default:
+				// Transient: the client retries, and startPaidOrder is idempotent per order.
+				writeError(w, 503, "翻译服务暂不可用，正在重试")
+			}
 			return
 		}
 		writeJSON(w, 200, map[string]string{"id": taskID})

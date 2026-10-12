@@ -162,6 +162,13 @@ func (s *Server) failPaidOrder(id, reason string) error {
 	return errPaidFailed
 }
 
+func paidFailureMessage(order PayOrder) string {
+	if order.FailReason == alreadyTranslated {
+		return msgAlreadyTranslated + "；本单请联系客服退款"
+	}
+	return "翻译多次失败，请联系客服处理退款"
+}
+
 func (s *Server) upstreamTaskState(ctx context.Context, taskID string) (string, string, error) {
 	resp, err := s.pdf2zh.Request(ctx, http.MethodGet, "/v1/translate/"+taskID)
 	if err != nil {
@@ -369,12 +376,8 @@ func (s *Server) writePaidStatus(w http.ResponseWriter, r *http.Request, order P
 		writeJSON(w, http.StatusOK, out)
 		return
 	case "failed":
-		message := "翻译多次失败，请联系客服处理退款"
-		if order.FailReason == alreadyTranslated {
-			message = msgAlreadyTranslated + "；本单请联系客服退款"
-		}
 		writeJSON(w, http.StatusOK, map[string]any{"id": taskID, "state": "error", "progress": 0.0,
-			"error": message})
+			"error": paidFailureMessage(order)})
 		return
 	}
 	go func() {
