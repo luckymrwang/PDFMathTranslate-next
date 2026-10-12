@@ -54,6 +54,7 @@ type PayOrder struct {
 	CreatedAt, LastQuery                                                int64
 	// Delivery is "" while translating, "archived" once results are durable, "failed" when retries are exhausted.
 	Delivery           string
+	FailReason         string
 	Attempts           int
 	TaskHistory        []string
 	MonoFile, DualFile string

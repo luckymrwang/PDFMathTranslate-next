@@ -213,6 +213,10 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || json.Unmarshal(raw, &result) != nil || result.Pages < 1 || result.Pages > 1000 {
 		log.Printf("prepare: page inspection failed (pages=%d): %v", result.Pages, err)
+		if errors.Is(err, errAlreadyTranslated) {
+			writeError(w, 422, msgAlreadyTranslated)
+			return
+		}
 		if err != nil && err.Error() == "python service unavailable" {
 			writeError(w, 503, "翻译服务暂不可用，请稍后重试")
 			return

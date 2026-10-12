@@ -343,7 +343,8 @@ func (s *Server) handleTranslateResult(w http.ResponseWriter, r *http.Request, t
 
 // upstreamStatus is the subset of the Python API status response we need.
 type upstreamStatus struct {
-	State string `json:"state"`
+	State     string `json:"state"`
+	ErrorType string `json:"error_type"`
 }
 
 func (s *Server) fetchStatus(ctx context.Context, taskID string) (*upstreamStatus, error) {

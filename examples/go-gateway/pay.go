@@ -110,6 +110,14 @@ func (s *Server) uploadFile(ctx context.Context, endpoint, path, name string, pa
 	if resp.StatusCode == http.StatusConflict {
 		return nil, errSubmitConflict
 	}
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		var body struct {
+			Detail any `json:"detail"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&body) == nil && body.Detail == alreadyTranslated {
+			return nil, errAlreadyTranslated
+		}
+	}
 	if resp.StatusCode != 200 {
 		return nil, errors.New("python rejected PDF or translation settings")
 	}
@@ -204,6 +212,10 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		Pages int `json:"page_count"`
 	}
 	if err != nil || json.Unmarshal(raw, &inspected) != nil || inspected.Pages <= 0 || inspected.Pages > 1000 {
+		if errors.Is(err, errAlreadyTranslated) {
+			writeError(w, 422, msgAlreadyTranslated)
+			return
+		}
 		writeError(w, 422, "PDF 无法读取或翻译引擎暂不可用，请检查文件及引擎配置")
 		return
 	}
@@ -469,6 +481,9 @@ func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, e
 			return order.TaskID, nil
 		}
 		taskID, err := s.submitPaidOrder(ctx, order)
+		if errors.Is(err, errAlreadyTranslated) {
+			return "", s.failPaidOrder(order.ID, alreadyTranslated)
+		}
 		if errors.Is(err, errSubmitConflict) {
 			// The worker lost the task bound to this attempt's key; retry under a fresh key.
 			if err := s.nextPaidAttempt(order.ID); err != nil {

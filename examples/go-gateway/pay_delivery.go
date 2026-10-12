@@ -23,10 +23,16 @@ const maxPaidAttempts = 3
 const pendingOrderTTL = 30 * time.Minute
 
 var (
-	errSubmitConflict = errors.New("paid task requires recovery")
-	errNoResult       = errors.New("translation produced no PDF")
-	errPaidFailed     = errors.New("paid translation failed permanently")
+	errSubmitConflict    = errors.New("paid task requires recovery")
+	errNoResult          = errors.New("translation produced no PDF")
+	errPaidFailed        = errors.New("paid translation failed permanently")
+	errAlreadyTranslated = errors.New("PDF is already a translation output")
 )
+
+// alreadyTranslated is the Python API's detail/error_type for BabelDOC output files.
+const alreadyTranslated = "already_translated"
+
+const msgAlreadyTranslated = "该文件已是翻译后的译文 PDF，请上传原始文档"
 
 // orderLocks serializes work per order so one slow submission never blocks other orders.
 type orderLocks struct {
@@ -86,7 +92,7 @@ func (s *Server) advancePaidOrder(ctx context.Context, id string, wait bool) err
 		_, err := s.startPaidOrderLocked(ctx, id)
 		return err
 	}
-	state, err := s.upstreamTaskState(ctx, order.TaskID)
+	state, errorType, err := s.upstreamTaskState(ctx, order.TaskID)
 	if err != nil {
 		return err
 	}
@@ -96,6 +102,11 @@ func (s *Server) advancePaidOrder(ctx context.Context, id string, wait bool) err
 	case "finished":
 		if err := s.archivePaidResult(ctx, order); !errors.Is(err, errNoResult) {
 			return err
+		}
+	case "error":
+		if errorType == alreadyTranslated {
+			s.deleteUpstreamTask(ctx, order.TaskID)
+			return s.failPaidOrder(id, alreadyTranslated)
 		}
 	}
 	log.Printf("paid translation task lost or failed, retrying (order=%s, state=%s)", id, state)
@@ -135,23 +146,39 @@ func (s *Server) nextPaidAttempt(id string) error {
 	return nil
 }
 
-func (s *Server) upstreamTaskState(ctx context.Context, taskID string) (string, error) {
+// failPaidOrder marks an order whose input can never be translated, skipping retries.
+func (s *Server) failPaidOrder(id, reason string) error {
+	err := s.pay.store.update(id, func(current *PayOrder) error {
+		if current.State == "refunded" {
+			return errors.New("order refunded")
+		}
+		current.Delivery, current.FailReason = "failed", reason
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("paid translation cannot succeed (%s), manual refund required (order=%s)", reason, id)
+	return errPaidFailed
+}
+
+func (s *Server) upstreamTaskState(ctx context.Context, taskID string) (string, string, error) {
 	resp, err := s.pdf2zh.Request(ctx, http.MethodGet, "/v1/translate/"+taskID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return "missing", nil
+		return "missing", "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("translation status %d", resp.StatusCode)
+		return "", "", fmt.Errorf("translation status %d", resp.StatusCode)
 	}
 	var st upstreamStatus
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return st.State, nil
+	return st.State, st.ErrorType, nil
 }
 
 func (s *Server) deleteUpstreamTask(ctx context.Context, taskID string) {
@@ -342,8 +369,12 @@ func (s *Server) writePaidStatus(w http.ResponseWriter, r *http.Request, order P
 		writeJSON(w, http.StatusOK, out)
 		return
 	case "failed":
+		message := "翻译多次失败，请联系客服处理退款"
+		if order.FailReason == alreadyTranslated {
+			message = msgAlreadyTranslated + "；本单请联系客服退款"
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"id": taskID, "state": "error", "progress": 0.0,
-			"error": "翻译多次失败，请联系客服处理退款"})
+			"error": message})
 		return
 	}
 	go func() {
