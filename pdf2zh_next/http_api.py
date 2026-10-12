@@ -60,6 +60,19 @@ MAX_CONCURRENT = int(os.environ.get("PDF2ZH_MAX_CONCURRENT", "2"))
 TASK_TTL_SECONDS = int(os.environ.get("PDF2ZH_TASK_TTL", str(2 * 60 * 60)))
 UPLOAD_CHUNK_SIZE = 1 << 20  # 1 MiB
 
+# Translation tuning defaults, overridable via environment. A value of 0 (or an
+# empty env var) means "unset". max_pages_per_part only splits documents larger
+# than it, and BabelDOC rejects values below 50, so leave it unset by default.
+DEFAULT_QPS = int(os.environ.get("PDF2ZH_QPS", "4"))
+DEFAULT_POOL_MAX_WORKERS = int(os.environ.get("PDF2ZH_POOL_MAX_WORKERS", "4")) or None
+DEFAULT_MAX_PAGES_PER_PART = int(os.environ.get("PDF2ZH_MAX_PAGES_PER_PART", "0")) or None
+DEFAULT_NO_MONO = os.environ.get("PDF2ZH_NO_MONO", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 _SENTINEL = object()  # marks end of an SSE stream
 
 
@@ -78,10 +91,12 @@ class TranslateRequest(BaseModel):
 
     lang_in: str = Field(default="en")
     lang_out: str = Field(default="zh")
-    qps: int = Field(default=4)
+    qps: int = Field(default=DEFAULT_QPS)
     pages: str | None = Field(default=None)
-    no_mono: bool = Field(default=False)
+    no_mono: bool = Field(default=DEFAULT_NO_MONO)
     no_dual: bool = Field(default=False)
+    max_pages_per_part: int | None = Field(default=DEFAULT_MAX_PAGES_PER_PART)
+    pool_max_workers: int | None = Field(default=DEFAULT_POOL_MAX_WORKERS)
     skip_image_translation: bool = Field(default=True)
     watermark_output_mode: Literal["watermarked", "no_watermark", "both"] = Field(
         default="watermarked"
@@ -162,8 +177,10 @@ def _build_settings(req: TranslateRequest, output_dir: Path) -> SettingsModel:
     settings.translation.lang_in = req.lang_in
     settings.translation.lang_out = req.lang_out
     settings.translation.qps = req.qps
+    settings.translation.pool_max_workers = req.pool_max_workers
     settings.translation.output = str(output_dir)
     settings.pdf.pages = req.pages
+    settings.pdf.max_pages_per_part = req.max_pages_per_part
     settings.pdf.no_mono = req.no_mono
     settings.pdf.no_dual = req.no_dual
     settings.pdf.skip_image_translation = req.skip_image_translation
