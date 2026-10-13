@@ -155,9 +155,17 @@ class GoogleSettings(BaseModel):
     """Google Translation settings"""
 
     translate_engine_type: Literal["Google"] = Field(default="Google")
+    google_api_key: str | None = Field(
+        default=None,
+        description="Google Cloud Translation API key (empty uses the free endpoint)",
+    )
 
     def validate_settings(self) -> None:
-        pass
+        if self.google_api_key:
+            self.google_api_key = _clean_string(self.google_api_key)
+
+
+GUI_PASSWORD_FIELDS.append("google_api_key")
 
 
 class DeepLSettings(BaseModel):

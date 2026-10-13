@@ -22,10 +22,11 @@
 
 ### 翻译引擎
 
-Google、Bing 默认可用。下列环境变量配置后会向小程序开放对应大模型；API Key 只存于 Go 进程环境，不下发给小程序。`GET /api/engines` 返回当前可选名称。
+Bing 默认可用。下列环境变量配置后会向小程序开放对应引擎；API Key 只存于 Go 进程环境，不下发给小程序。`GET /api/engines` 返回当前可选名称。
 
 | 小程序选项 | 必需变量 | 可选变量 |
 | --- | --- | --- |
+| Google | `GOOGLE_API_KEY`（Google Cloud Translation API） | 无 key 时可设 `GOOGLE_FREE=true` 使用免费接口，但机房 IP 通常会被限流（HTTP 429） |
 | GPT-6 | `OPENAI_API_KEY` | `OPENAI_MODEL`（默认 `gpt-6-luna`）、`OPENAI_BASE_URL` |
 | DeepSeek-V4.1-Flash | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL`（默认 `deepseek-flash`），官方地址 `https://api.deepseek.com/v1` |
 | Gemini 2.5 Pro | `GEMINI_API_KEY` | `GEMINI_MODEL`（默认 `gemini-2.5-pro`） |

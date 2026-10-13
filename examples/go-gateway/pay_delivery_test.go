@@ -23,7 +23,7 @@ func paidOrderFixture(t *testing.T, s *Server, id, taskID string, attempts int) 
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(content)
-	order := PayOrder{ID: id, OpenID: "owner", State: "submitted", Engine: "Google", LangIn: "en", LangOut: "zh",
+	order := PayOrder{ID: id, OpenID: "owner", State: "submitted", Engine: "Bing", LangIn: "en", LangOut: "zh",
 		FilePath: path, FileHash: hex.EncodeToString(sum[:]), Name: "a.pdf", TaskID: taskID, Attempts: attempts}
 	if err := s.pay.store.add(order); err != nil {
 		t.Fatal(err)

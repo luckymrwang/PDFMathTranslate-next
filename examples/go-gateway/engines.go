@@ -9,8 +9,14 @@ import (
 // the mini-program or accepted from its multipart request.
 func availableEngines() map[string]map[string]string {
 	engines := map[string]map[string]string{
-		"Google": {"translate_engine_type": "Google"},
-		"Bing":   {"translate_engine_type": "Bing"},
+		"Bing": {"translate_engine_type": "Bing"},
+	}
+	// The keyless Google endpoint is rate-limited on most datacenter IPs, so
+	// Google is offered only with an API key or when explicitly enabled.
+	if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
+		engines["Google"] = map[string]string{"translate_engine_type": "Google", "google_api_key": key}
+	} else if os.Getenv("GOOGLE_FREE") == "true" {
+		engines["Google"] = map[string]string{"translate_engine_type": "Google"}
 	}
 	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 		engines["GPT-6"] = map[string]string{

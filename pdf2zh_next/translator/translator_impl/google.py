@@ -1,6 +1,4 @@
-import html
 import logging
-import re
 import unicodedata
 
 import requests
@@ -31,10 +29,7 @@ class GoogleTranslator(BaseTranslator):
     ):
         super().__init__(settings, rate_limiter)
         self.session = requests.Session()
-        self.endpoint = "https://translate.google.com/m"
-        self.headers = {
-            "User-Agent": "Mozilla/4.0 (compatible;MSIE 6.0;Windows NT 5.1;SV1;.NET CLR 1.1.4322;.NET CLR 2.0.50727;.NET CLR 3.0.04506.30)"  # noqa: E501
-        }
+        self.api_key = getattr(settings.translate_engine_settings, "google_api_key", None)
 
     @retry(
         retry=retry_if_exception_type(Exception),
@@ -44,17 +39,36 @@ class GoogleTranslator(BaseTranslator):
     )
     def do_translate(self, text, rate_limit_params: dict = None):
         text = text[:5000]  # google translate max length
-        response = self.session.get(
-            self.endpoint,
-            params={"tl": self.lang_out, "sl": self.lang_in, "q": text},
-            headers=self.headers,
-        )
-        re_result = re.findall(
-            r'(?s)class="(?:t0|result-container)">(.*?)<', response.text
-        )
-        if response.status_code == 400:
-            result = "IRREPARABLE TRANSLATION ERROR"
+        if self.api_key:
+            result = self._translate_cloud(text)
         else:
-            response.raise_for_status()
-            result = html.unescape(re_result[0])
+            result = self._translate_free(text)
         return remove_control_characters(result)
+
+    def _translate_cloud(self, text: str) -> str:
+        # Google Cloud Translation API v2 (Basic).
+        response = self.session.post(
+            "https://translation.googleapis.com/language/translate/v2",
+            params={"key": self.api_key},
+            json={
+                "q": text,
+                "source": self.lang_in,
+                "target": self.lang_out,
+                "format": "text",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()["data"]["translations"][0]["translatedText"]
+
+    def _translate_free(self, text: str) -> str:
+        # Unofficial keyless endpoint; datacenter IPs are often rate-limited (HTTP 429).
+        response = self.session.post(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": self.lang_in, "tl": self.lang_out, "dt": "t"},
+            data={"q": text},
+            timeout=30,
+        )
+        response.raise_for_status()
+        segments = response.json()[0] or []
+        return "".join(segment[0] for segment in segments if segment and segment[0])
