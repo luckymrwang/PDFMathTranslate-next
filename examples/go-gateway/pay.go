@@ -52,8 +52,12 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"enabled": false})
 		return
 	}
+	enginePrices := map[string]int{}
+	for engine, p := range s.pay.cfg.EngineProducts {
+		enginePrices[engine] = p.Price
+	}
 	writeJSON(w, 200, map[string]any{"enabled": true, "standard_price_fen": s.pay.cfg.StandardPrice,
-		"enhanced_price_fen": s.pay.cfg.EnhancedPrice})
+		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices})
 }
 
 // uploadFile is also used for server-side PDF inspection. Never send local
@@ -219,10 +223,7 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 422, "PDF 无法读取或翻译引擎暂不可用，请检查文件及引擎配置")
 		return
 	}
-	product, price := s.pay.cfg.EnhancedProduct, s.pay.cfg.EnhancedPrice
-	if data.Engine == "Google" || data.Engine == "Bing" {
-		product, price = s.pay.cfg.StandardProduct, s.pay.cfg.StandardPrice
-	}
+	product, price := s.pay.cfg.productFor(data.Engine)
 	if inspected.Pages*price > 10000000 {
 		writeError(w, 400, "订单金额超过限额")
 		return

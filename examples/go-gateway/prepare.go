@@ -318,10 +318,7 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 429, "操作过于频繁，请一分钟后重试")
 		return
 	}
-	product, price := s.pay.cfg.EnhancedProduct, s.pay.cfg.EnhancedPrice
-	if input.Engine == "Google" || input.Engine == "Bing" {
-		product, price = s.pay.cfg.StandardProduct, s.pay.cfg.StandardPrice
-	}
+	product, price := s.pay.cfg.productFor(input.Engine)
 	if file.Pages*price > 10000000 {
 		writeError(w, 400, "订单金额超过限额")
 		return

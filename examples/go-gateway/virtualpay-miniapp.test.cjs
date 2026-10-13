@@ -97,7 +97,10 @@ async function run() {
   page.preparedFile = { path: 'ready.pdf', page_count: 16, file_token: 'ready',
     expires_at: Date.now() / 1000 + 1800 }
   let configRequests = 0, orderCreations = 0
-  api.getPayConfig = async () => { configRequests++; return { enabled: true } }
+  api.getPayConfig = async () => {
+    configRequests++
+    return { enabled: true, standard_price_fen: 10, enhanced_price_fen: 30, engine_prices_fen: { 'GPT-6': 40 } }
+  }
   api.createPreparedOrder = async () => {
     orderCreations++
     return { order: { id: 'quote-' + orderCreations, quantity: 16, unit_price_fen: 20, total_fen: 320 },
@@ -106,7 +109,7 @@ async function run() {
   const configWarmup = page.getPaymentConfig()
   await configWarmup
   const opening = page.openPaymentSheet()
-  assert.equal(page.data.paymentTotal, '8.00', 'Show the page test amount as soon as page count is known')
+  assert.equal(page.data.paymentTotal, '6.40', 'Show the GPT-6 page amount as soon as page count is known')
   assert.equal(page.data.orderReady, false, 'An early display amount does not enable payment')
   await opening
   assert.equal(configRequests, 1, 'Reuse the background payment config check')
@@ -116,8 +119,8 @@ async function run() {
   assert.equal(orderCreations, 0, 'Repeated preview visits must not accumulate orders')
   await page.confirmTranslation()
   assert.equal(orderCreations, 1, 'Create an order only for an explicit payment action')
-  assert.equal(page.data.unitPrice, '0.50')
-  assert.equal(page.data.paymentTotal, '8.00', 'Keep display test amount stable when backend test pricing differs')
+  assert.equal(page.data.unitPrice, '0.40')
+  assert.equal(page.data.paymentTotal, '6.40', 'Display follows the configured per-engine price')
   assert.equal(page.payData.signData, 'server-payload', 'Keep the actual server payment payload unchanged')
   assert.equal(page.data.orderReady, true)
   page.closePaymentSheet()

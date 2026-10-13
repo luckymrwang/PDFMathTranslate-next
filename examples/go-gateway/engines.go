@@ -27,6 +27,14 @@ func availableEngines() map[string]map[string]string {
 		if base := os.Getenv("OPENAI_BASE_URL"); base != "" {
 			engines["GPT-6"]["openai_base_url"] = base
 		}
+		engines["GPT-5.6"] = map[string]string{
+			"translate_engine_type": "OpenAI",
+			"openai_api_key":        key,
+			"openai_model":          getenv("OPENAI_GPT56_MODEL", "gpt-5.6-luna"),
+		}
+		if base := os.Getenv("OPENAI_BASE_URL"); base != "" {
+			engines["GPT-5.6"]["openai_base_url"] = base
+		}
 	}
 	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
 		engines["DeepSeek-V4.1-Flash"] = map[string]string{
@@ -61,7 +69,7 @@ func (s *Server) handleEngines(w http.ResponseWriter, r *http.Request) {
 	}
 	available := availableEngines()
 	names := make([]string, 0, len(available))
-	for _, name := range []string{"Bing", "Google", "GPT-6", "Claude 3.7 Sonnet", "DeepSeek-V4.1-Flash", "Gemini 2.5 Pro"} {
+	for _, name := range []string{"Bing", "Google", "GPT-6", "GPT-5.6", "DeepSeek-V4.1-Flash", "Claude 3.7 Sonnet", "Gemini 2.5 Pro"} {
 		if _, ok := available[name]; ok {
 			names = append(names, name)
 		}

@@ -28,6 +28,7 @@ Bing 默认可用。下列环境变量配置后会向小程序开放对应引擎
 | --- | --- | --- |
 | Google | `GOOGLE_API_KEY`（Google Cloud Translation API） | 无 key 时可设 `GOOGLE_FREE=true` 使用免费接口，但机房 IP 通常会被限流（HTTP 429） |
 | GPT-6 | `OPENAI_API_KEY` | `OPENAI_MODEL`（默认 `gpt-6-luna`）、`OPENAI_BASE_URL` |
+| GPT-5.6 | `OPENAI_API_KEY`（与 GPT-6 共用 key 和 `OPENAI_BASE_URL`） | `OPENAI_GPT56_MODEL`（默认 `gpt-5.6-luna`） |
 | DeepSeek-V4.1-Flash | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL`（默认 `deepseek-flash`），官方地址 `https://api.deepseek.com/v1` |
 | Gemini 2.5 Pro | `GEMINI_API_KEY` | `GEMINI_MODEL`（默认 `gemini-2.5-pro`） |
 | Claude 3.7 Sonnet | `CLAUDE_CODE_PATH`（Python 服务可执行的 Claude Code CLI 路径） | `CLAUDE_CODE_MODEL` |

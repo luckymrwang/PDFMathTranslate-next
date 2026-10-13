@@ -18,7 +18,17 @@ type PayConfig struct {
 	OfferID, AppKey, NotifyToken, AESKey, Dir string
 	StandardProduct, EnhancedProduct          string
 	StandardPrice, EnhancedPrice              int
+	// Engines priced separately; others use the standard or enhanced product.
+	EngineProducts map[string]enginePrice
 }
+
+type enginePrice struct {
+	Product string
+	Price   int
+}
+
+// engineProductEnv maps an engine to its optional VIRTUALPAY_<PREFIX>_PRODUCT_ID / _PRICE_FEN pair.
+var engineProductEnv = map[string]string{"Google": "GOOGLE", "GPT-6": "GPT"}
 
 func loadPayConfig() (*PayConfig, error) {
 	c := &PayConfig{Enabled: os.Getenv("VIRTUALPAY_ENABLED") == "true",
@@ -26,7 +36,8 @@ func loadPayConfig() (*PayConfig, error) {
 		NotifyToken: os.Getenv("VIRTUALPAY_NOTIFY_TOKEN"), AESKey: os.Getenv("VIRTUALPAY_ENCODING_AES_KEY"),
 		Dir:             getenv("VIRTUALPAY_DATA_DIR", "./data/virtualpay"),
 		StandardProduct: os.Getenv("VIRTUALPAY_STANDARD_PRODUCT_ID"),
-		EnhancedProduct: os.Getenv("VIRTUALPAY_ENHANCED_PRODUCT_ID")}
+		EnhancedProduct: os.Getenv("VIRTUALPAY_ENHANCED_PRODUCT_ID"),
+		EngineProducts:  map[string]enginePrice{}}
 	c.StandardPrice, _ = strconv.Atoi(os.Getenv("VIRTUALPAY_STANDARD_PRICE_FEN"))
 	c.EnhancedPrice, _ = strconv.Atoi(os.Getenv("VIRTUALPAY_ENHANCED_PRICE_FEN"))
 	if !c.Enabled {
@@ -38,10 +49,33 @@ func loadPayConfig() (*PayConfig, error) {
 	if c.StandardPrice <= 0 || c.EnhancedPrice <= 0 || c.StandardPrice > 100000 || c.EnhancedPrice > 100000 {
 		return nil, errors.New("virtual payment product prices must be valid integer fen")
 	}
+	for engine, prefix := range engineProductEnv {
+		product := os.Getenv("VIRTUALPAY_" + prefix + "_PRODUCT_ID")
+		rawPrice := os.Getenv("VIRTUALPAY_" + prefix + "_PRICE_FEN")
+		if product == "" && rawPrice == "" {
+			continue
+		}
+		price, err := strconv.Atoi(rawPrice)
+		if product == "" || err != nil || price <= 0 || price > 100000 {
+			return nil, fmt.Errorf("VIRTUALPAY_%s_PRODUCT_ID and VIRTUALPAY_%s_PRICE_FEN must be set together with a valid fen price", prefix, prefix)
+		}
+		c.EngineProducts[engine] = enginePrice{product, price}
+	}
 	if _, err := decodeAESKey(c.AESKey); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// productFor returns the virtual-payment product and per-page price for an engine.
+func (c *PayConfig) productFor(engine string) (string, int) {
+	if p, ok := c.EngineProducts[engine]; ok {
+		return p.Product, p.Price
+	}
+	if engine == "Google" || engine == "Bing" {
+		return c.StandardProduct, c.StandardPrice
+	}
+	return c.EnhancedProduct, c.EnhancedPrice
 }
 
 // Internal disk record. Only orderView may be returned to a client.
