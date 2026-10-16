@@ -346,15 +346,24 @@ func (s *Server) handlePayQuery(w http.ResponseWriter, r *http.Request) {
 		if err := s.reconcileOrder(r.Context(), order.ID); err != nil {
 			log.Printf("virtual payment query failed (order=%s): %v", order.ID, err)
 			var apiErr *wechatAPIError
-			if errors.As(err, &apiErr) {
+			switch {
+			case errors.As(err, &apiErr) && apiErr.Operation == "/xpay/query_order":
+				// The platform has no record of an order the user never paid. Keep it
+				// pending (the reconciler closes it on expiry) and throttle re-queries.
+				_ = s.pay.store.update(order.ID, func(current *PayOrder) error {
+					current.LastQuery = time.Now().Unix()
+					return nil
+				})
+			case errors.As(err, &apiErr):
 				writeJSON(w, 502, map[string]any{
 					"error":             fmt.Sprintf("微信查单失败（错误码 %d），请检查服务器配置", apiErr.Code),
 					"wechat_error_code": apiErr.Code,
 				})
 				return
+			default:
+				writeError(w, 502, "微信查单暂不可用，请稍后重试")
+				return
 			}
-			writeError(w, 502, "微信查单暂不可用，请稍后重试")
-			return
 		}
 	}
 	order, _ = s.pay.store.get(order.ID)

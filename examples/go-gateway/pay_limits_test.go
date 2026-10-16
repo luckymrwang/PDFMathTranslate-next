@@ -38,6 +38,44 @@ func TestOldPendingOrdersDoNotPermanentlyBlockPayment(t *testing.T) {
 	}
 }
 
+func TestQueryOfUnpaidOrderStaysPendingWithoutServerError(t *testing.T) {
+	s := testPayServer(t)
+	queries := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/cgi-bin/stable_token" {
+			writeJSON(w, 200, map[string]any{"access_token": "token", "expires_in": 7200})
+			return
+		}
+		queries++
+		writeJSON(w, 200, map[string]any{"errcode": 268490002})
+	}))
+	defer upstream.Close()
+	s.pay.client = &XPayClient{BaseURL: upstream.URL, HTTP: upstream.Client(), AppKey: "app-key", AppSecret: "secret"}
+	if err := s.pay.store.add(PayOrder{ID: "never-paid", OpenID: "owner", State: "pending",
+		CreatedAt: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	ask := func() string {
+		w := httptest.NewRecorder()
+		s.handlePayQuery(w, ownRequest("POST", "/pay/query", "owner", bytes.NewBufferString(`{"order_id":"never-paid"}`)))
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		var out struct {
+			State string `json:"state"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out.State
+	}
+	if state := ask(); state != "pending" {
+		t.Fatal("unpaid order must stay pending, got", state)
+	}
+	ask()
+	if queries != 1 {
+		t.Fatal("repeated taps must be throttled, platform queried", queries)
+	}
+}
+
 func TestQueryExposesOnlyWechatErrorCode(t *testing.T) {
 	s := testPayServer(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
