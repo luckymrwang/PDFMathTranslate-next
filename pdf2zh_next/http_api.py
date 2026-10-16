@@ -406,6 +406,9 @@ async def _check_engine(request: TranslateRequest) -> None:
     if task is None:
         async def probe():
             try:
+                # Engines such as DeepSeek are only usable after validate_settings()
+                # transforms them into an OpenAI-compatible config.
+                await asyncio.to_thread(settings.validate_settings)
                 await asyncio.to_thread(get_translator, settings)
                 _engine_checked_at[key] = time.monotonic()
                 if len(_engine_checked_at) > 128:

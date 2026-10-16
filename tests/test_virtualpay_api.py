@@ -103,6 +103,21 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
             await self.client.post("/v1/engine/check", json={})
             self.assertEqual(check.call_count, 2)
 
+    async def test_engine_check_transforms_deepseek_before_probing(self):
+        seen = []
+        with patch("pdf2zh_next.translator.get_translator",
+                   side_effect=lambda settings: seen.append(type(settings.translate_engine_settings).__name__)):
+            result = await self.client.post("/v1/engine/check", json={
+                "translate_engine_settings": {
+                    "translate_engine_type": "DeepSeek",
+                    "deepseek_api_key": "sk-test",
+                    "deepseek_model": "deepseek-flash",
+                    "deepseek_thinking_mode": "disabled",
+                },
+            })
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(seen, ["OpenAISettings"])
+
     async def test_failed_prewarm_is_not_cached(self):
         with patch("pdf2zh_next.translator.get_translator", side_effect=RuntimeError("secret")) as check:
             for _ in range(2):
