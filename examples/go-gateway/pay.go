@@ -32,6 +32,7 @@ func (s *Server) payEnabled() bool { return s.pay != nil && s.pay.cfg.Enabled }
 
 func orderView(order PayOrder) map[string]any {
 	return map[string]any{"id": order.ID, "state": order.State, "quantity": order.Quantity,
+		"pages":          order.PageCount(),
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt}
@@ -57,7 +58,8 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 		enginePrices[engine] = p.Price
 	}
 	writeJSON(w, 200, map[string]any{"enabled": true, "standard_price_fen": s.pay.cfg.StandardPrice,
-		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices})
+		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices,
+		"ios_unit_fen": s.pay.cfg.IOSUnit, "ios_min_fen": iosMinFen})
 }
 
 // uploadFile is also used for server-side PDF inspection. Never send local
@@ -166,9 +168,10 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var data struct {
-		Engine  string `json:"engine"`
-		LangIn  string `json:"lang_in"`
-		LangOut string `json:"lang_out"`
+		Engine   string `json:"engine"`
+		LangIn   string `json:"lang_in"`
+		LangOut  string `json:"lang_out"`
+		Platform string `json:"platform"`
 	}
 	if json.Unmarshal([]byte(r.FormValue("data")), &data) != nil {
 		writeError(w, 400, "invalid settings")
@@ -223,8 +226,9 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 422, "PDF 无法读取或翻译引擎暂不可用，请检查文件及引擎配置")
 		return
 	}
-	product, price := s.pay.cfg.productFor(data.Engine)
-	if inspected.Pages*price > 10000000 {
+	// The client platform only decides rounding up; claiming iOS can never lower the price.
+	product, unit, quantity, total := s.pay.cfg.orderAmounts(data.Engine, inspected.Pages, data.Platform == "ios")
+	if total > 10000000 {
 		writeError(w, 400, "订单金额超过限额")
 		return
 	}
@@ -233,8 +237,8 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "无法创建订单")
 		return
 	}
-	order := PayOrder{ID: id, OpenID: openid, ProductID: product, UnitPrice: price,
-		Quantity: inspected.Pages, Total: inspected.Pages * price, Engine: data.Engine,
+	order := PayOrder{ID: id, OpenID: openid, ProductID: product, UnitPrice: unit,
+		Pages: inspected.Pages, Quantity: quantity, Total: total, Engine: data.Engine,
 		LangIn: data.LangIn, LangOut: data.LangOut, FilePath: stagedPath,
 		FileHash: hex.EncodeToString(hash.Sum(nil)), Name: filepath.Base(header.Filename),
 		State: "pending", CreatedAt: time.Now().Unix(), Attach: id}

@@ -209,6 +209,47 @@ async function run() {
   assert.equal(duplicateUploads, 1, 'Only missing server files fall back to a local upload')
   assert.equal(page.sourceOrderID, null)
   assert.equal(page.paymentIntent.fileToken, 'fallback-upload')
+  // iOS: Apple rejects orders under 1 yuan, so amounts are rounded up in 0.5 yuan steps.
+  const ios = { ios_unit_fen: 50, ios_min_fen: 100 }
+  assert.deepEqual(payment.quote(1, 19, ios, true), { subtotal: 19, total: 100, rounded: true, unit: 50, minFen: 100 })
+  assert.equal(payment.quote(11, 10, ios, true).total, 150)
+  assert.equal(payment.quote(6, 30, ios, true).total, 200)
+  assert.equal(payment.quote(10, 10, ios, true).rounded, false, 'Exactly 1 yuan needs no rounding')
+  assert.equal(payment.quote(1, 10, ios, false).total, 10, 'Android keeps page billing')
+  assert.equal(payment.quote(1, 10, {}, true).total, 10, 'No iOS unit offered by the server: no rounding')
+  page.payPrices = { standard_price_fen: 10, enhanced_price_fen: 30, engine_prices_fen: {}, ...ios }
+  page.isIOS = true
+  const iosValues = page.quoteValues(1, 'Bing')
+  assert.equal(iosValues.subtotal, '0.10')
+  assert.equal(iosValues.paymentTotal, '1.00')
+  assert.equal(iosValues.iosRounded, true)
+  assert.equal(iosValues.iosRuleValue, '补足至 ¥1.00')
+  assert.match(iosValues.iosNote, /不低于 1\.00 元.*0\.5 元一档.*本单 0\.10 元，实付 1\.00 元/)
+  page.isIOS = false
+  const androidValues = page.quoteValues(1, 'Bing')
+  assert.equal(androidValues.paymentTotal, '0.10')
+  assert.equal(androidValues.iosRounded, false)
+  assert.equal(page.quoteValues(null, 'Bing').paymentTotal, '—')
+  page.isIOS = true
+  let sentPlatform
+  api.createPreparedOrder = async (token, body) => {
+    sentPlatform = body.platform
+    return { order: { id: 'ios-order', total_fen: 100 }, payData: { signData: 'p' } }
+  }
+  page.paymentIntent = { job: { source: 'en', target: 'zh', engine: 'Bing' }, fileToken: 'ios-file' }
+  page.quotedJob = null
+  page.data.orderReady = true
+  page.data.engine = 'Bing'
+  page.availableEngines = new Set(['Bing'])
+  serverState = 'paid'
+  await page.confirmTranslation()
+  assert.equal(sentPlatform, 'ios', 'The order request must tell the gateway this is an iOS device')
+  page.isIOS = false
+  page.paymentIntent = { job: { source: 'en', target: 'zh', engine: 'Bing' }, fileToken: 'android-file' }
+  page.quotedJob = null
+  page.data.orderReady = true
+  await page.confirmTranslation()
+  assert.equal(sentPlatform, undefined, 'Other platforms send no platform marker')
   vm.runInNewContext(fs.readFileSync(path.join(root, 'pages/history/history.js'), 'utf8'), { ...sandbox })
   page.setData = values => Object.assign(page.data, values)
   page.alive = true
@@ -224,6 +265,7 @@ async function run() {
   orderState = 'pending'
   await page.loadOrders()
   assert.equal(page.data.orders.length, 0, 'Payments the user cancelled are not listed as orders')
+
   console.log('PASS: payment proof, lifecycle, upload reuse, stable test amounts, prefetch, retry')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

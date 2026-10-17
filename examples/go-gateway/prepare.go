@@ -281,6 +281,7 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		Engine    string `json:"engine"`
 		LangIn    string `json:"lang_in"`
 		LangOut   string `json:"lang_out"`
+		Platform  string `json:"platform"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil {
 		writeError(w, 400, "invalid settings")
@@ -318,8 +319,9 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 429, "操作过于频繁，请一分钟后重试")
 		return
 	}
-	product, price := s.pay.cfg.productFor(input.Engine)
-	if file.Pages*price > 10000000 {
+	// The client platform only decides rounding up; claiming iOS can never lower the price.
+	product, unit, quantity, total := s.pay.cfg.orderAmounts(input.Engine, file.Pages, input.Platform == "ios")
+	if total > 10000000 {
 		writeError(w, 400, "订单金额超过限额")
 		return
 	}
@@ -328,8 +330,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "无法创建订单")
 		return
 	}
-	order := PayOrder{ID: id, OpenID: owner, ProductID: product, UnitPrice: price,
-		Quantity: file.Pages, Total: file.Pages * price, Engine: input.Engine,
+	order := PayOrder{ID: id, OpenID: owner, ProductID: product, UnitPrice: unit,
+		Pages: file.Pages, Quantity: quantity, Total: total, Engine: input.Engine,
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path,
 		FileHash: file.Hash, Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id}
 	signData, _ := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID,

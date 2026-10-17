@@ -11,7 +11,7 @@
 ## 配置和部署
 
 1. 将 `.env.virtualpay.example` 的条目加入现有被 Git 忽略的 `.env`，通过 `./start.sh` 启动。不要向聊天、日志、前端或仓库粘贴密钥。既有 WECHAT_APPSECRET/JWT_SECRET 仍必需，JWT_SECRET 重启应保持不变。
-2. OfferID、现网 AppKey 来自虚拟支付基本配置。AppKey 不是小程序 AppSecret。配置已发布的两种道具 ID，整数分单价必须与后台一致；模板 10/50 分只是示例。Google、GPT-6 如需单独定价，另建道具并同时设置 `VIRTUALPAY_GOOGLE_*` 或 `VIRTUALPAY_GPT_*` 的 `_PRODUCT_ID` 与 `_PRICE_FEN`，未设置时分别按标准、增强道具计费。现有 AppID 为 wx760bf26760f46645。
+2. OfferID、现网 AppKey 来自虚拟支付基本配置。AppKey 不是小程序 AppSecret。配置已发布的两种道具 ID，整数分单价必须与后台一致；模板 10/50 分只是示例。Google、GPT-6 如需单独定价，另建道具并同时设置 `VIRTUALPAY_GOOGLE_*` 或 `VIRTUALPAY_GPT_*` 的 `_PRODUCT_ID` 与 `_PRICE_FEN`，未设置时分别按标准、增强道具计费。iOS 端的 Apple 支付要求单笔不低于 1 元（否则报 `IOS_ORDER_PRICE_TOO_LOW`），需另建一个小额道具（如 0.5 元）并设置 `VIRTUALPAY_IOS_PRODUCT_ID` 与 `VIRTUALPAY_IOS_PRICE_FEN`：iOS 订单按该道具的单位向上取整，最低 1 元，以购买件数下单，订单记录仍保存原页数。未配置时 iOS 不取整（低于 1 元的订单会被 Apple 拒绝）。现有 AppID 为 wx760bf26760f46645。
 3. 配置消息推送 Token 和 43 位 EncodingAESKey，后台选安全加密模式。HTTPS 发货推送 URL 为 `https://你的域名/pay/notify`，支持 GET 校验和加密 XML/JSON POST，拒绝明文支付通知。相关后台入口若复用接收地址，Token/AESKey 必须相同。
 4. iOS 配置小程序简称并开通 Apple IAP，真机微信 >=8.0.68；前端有版本和接口能力检查。
 5. 小程序 config.js 的 baseUrl 改为 HTTPS 网关，配置 request/uploadFile/downloadFile 合法域名；OSS 域名列入下载合法域名。手机的 127.0.0.1 不是电脑。

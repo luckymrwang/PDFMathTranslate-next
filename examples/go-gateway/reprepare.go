@@ -39,7 +39,7 @@ func (s *Server) handleRepreparePDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "请先确认原订单状态，避免重复支付")
 		return
 	}
-	if order.Quantity < 1 || order.Quantity > 1000 || order.FileHash == "" {
+	if order.PageCount() < 1 || order.PageCount() > 1000 || order.FileHash == "" {
 		writeError(w, 410, "原文件凭证已失效，请重新选择 PDF")
 		return
 	}
@@ -110,7 +110,7 @@ func (s *Server) handleRepreparePDF(w http.ResponseWriter, r *http.Request) {
 	}
 	expires := time.Now().Add(30 * time.Minute)
 	s.prepared.Lock()
-	s.prepared.files[id] = preparedPDF{Owner: owner, Path: linked, Name: order.Name, Hash: order.FileHash, Pages: order.Quantity, Expires: expires}
+	s.prepared.files[id] = preparedPDF{Owner: owner, Path: linked, Name: order.Name, Hash: order.FileHash, Pages: order.PageCount(), Expires: expires}
 	s.prepared.Unlock()
 	keep = true
 	time.AfterFunc(30*time.Minute, func() {
@@ -121,5 +121,5 @@ func (s *Server) handleRepreparePDF(w http.ResponseWriter, r *http.Request) {
 			delete(s.prepared.files, id)
 		}
 	})
-	writeJSON(w, 200, map[string]any{"file_token": id, "page_count": order.Quantity, "file_name": order.Name, "file_size": size, "expires_at": expires.Unix()})
+	writeJSON(w, 200, map[string]any{"file_token": id, "page_count": order.PageCount(), "file_name": order.Name, "file_size": size, "expires_at": expires.Unix()})
 }

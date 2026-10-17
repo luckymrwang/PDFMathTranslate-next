@@ -20,7 +20,14 @@ type PayConfig struct {
 	StandardPrice, EnhancedPrice              int
 	// Engines priced separately; others use the standard or enhanced product.
 	EngineProducts map[string]enginePrice
+	// iOS (Apple) rejects orders under iosMinFen. With an iOS unit product configured,
+	// iOS orders are rounded up to whole units of IOSUnit fen and bought as that product.
+	IOSProduct string
+	IOSUnit    int
 }
+
+// iosMinFen is Apple payment's minimum order amount.
+const iosMinFen = 100
 
 type enginePrice struct {
 	Product string
@@ -64,6 +71,14 @@ func loadPayConfig() (*PayConfig, error) {
 	if _, err := decodeAESKey(c.AESKey); err != nil {
 		return nil, err
 	}
+	c.IOSProduct = os.Getenv("VIRTUALPAY_IOS_PRODUCT_ID")
+	if rawUnit := os.Getenv("VIRTUALPAY_IOS_PRICE_FEN"); c.IOSProduct != "" || rawUnit != "" {
+		unit, err := strconv.Atoi(rawUnit)
+		if c.IOSProduct == "" || err != nil || unit <= 0 || unit > iosMinFen {
+			return nil, errors.New("VIRTUALPAY_IOS_PRODUCT_ID and VIRTUALPAY_IOS_PRICE_FEN must be set together (unit price in fen, at most 100)")
+		}
+		c.IOSUnit = unit
+	}
 	return c, nil
 }
 
@@ -78,10 +93,28 @@ func (c *PayConfig) productFor(engine string) (string, int) {
 	return c.EnhancedProduct, c.EnhancedPrice
 }
 
+// orderAmounts returns the product, per-unit price, units bought and total (fen)
+// for an order. Without an iOS unit product the amount is simply pages x price.
+func (c *PayConfig) orderAmounts(engine string, pages int, ios bool) (product string, unit, quantity, total int) {
+	product, unit = c.productFor(engine)
+	if !ios || c.IOSProduct == "" {
+		return product, unit, pages, pages * unit
+	}
+	ceil := func(amount int) int { return (amount + c.IOSUnit - 1) / c.IOSUnit }
+	units := ceil(pages * unit)
+	if minUnits := ceil(iosMinFen); units < minUnits {
+		units = minUnits
+	}
+	return c.IOSProduct, c.IOSUnit, units, units * c.IOSUnit
+}
+
 // Internal disk record. Only orderView may be returned to a client.
 type PayOrder struct {
-	ID, OpenID, ProductID                                               string
-	Quantity, UnitPrice, Total                                          int
+	ID, OpenID, ProductID      string
+	Quantity, UnitPrice, Total int
+	// Pages is the document page count; Quantity is the number of units bought and
+	// differs from it for iOS rounded orders. Zero on orders created before Pages existed.
+	Pages                                                               int
 	Engine, LangIn, LangOut, FilePath, FileHash, Name, Attach, SignData string
 	State, WxOrderID, TaskID                                            string
 	Provided                                                            bool
@@ -93,6 +126,14 @@ type PayOrder struct {
 	TaskHistory        []string
 	MonoFile, DualFile string
 	MonoKey, DualKey   string
+}
+
+// PageCount returns the document's page count, falling back to Quantity for older orders.
+func (o PayOrder) PageCount() int {
+	if o.Pages > 0 {
+		return o.Pages
+	}
+	return o.Quantity
 }
 
 type OrderStore struct {
