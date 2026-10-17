@@ -175,3 +175,6 @@ uv.lock
 *.pdf
 *.docx
 CLAUDE.md
+
+# Gateway binary is rebuilt by deploy/start-gateway.sh on every start
+examples/go-gateway/go-gateway

@@ -69,7 +69,7 @@ func (s *Server) handleEngines(w http.ResponseWriter, r *http.Request) {
 	}
 	available := availableEngines()
 	names := make([]string, 0, len(available))
-	for _, name := range []string{"Bing", "Google", "GPT-6", "GPT-5.6", "DeepSeek-V4.1-Flash", "Claude 3.7 Sonnet", "Gemini 2.5 Pro"} {
+	for _, name := range []string{"Bing", "Google", "DeepSeek-V4.1-Flash", "GPT-5.6", "GPT-6", "Claude 3.7 Sonnet", "Gemini 2.5 Pro"} {
 		if _, ok := available[name]; ok {
 			names = append(names, name)
 		}

@@ -1,10 +1,13 @@
 #!/bin/bash
-# Restart the PDF2ZH API and the Go gateway: stop whatever already listens on
-# their ports, then start both detached. Usage: deploy/restart-all.sh [-f]
+# Update the repo, then restart the PDF2ZH API and the Go gateway: stop whatever
+# already listens on their ports and start both detached.
+# Usage: deploy/restart-all.sh [-f]
 #   -f  restart even if translations are still running (they will be lost)
+# Env: SKIP_PULL=1 skips git pull; REPO_DIR overrides the repo location.
 set -u
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${REPO_DIR:-$(cd "$DIR/.." && pwd)}"
 GW_DIR="$DIR/../examples/go-gateway"
 API_PORT="${PDF2ZH_API_PORT:-11008}"
 LOG_DIR="${LOG_DIR:-/root}"
@@ -67,30 +70,59 @@ wait_listen() {
     return 1
 }
 
-active=$(curl -s -m 3 "http://127.0.0.1:$API_PORT/health" 2>/dev/null \
-    | sed -n 's/.*"active_tasks": *\([0-9][0-9]*\).*/\1/p')
-if [ "${active:-0}" -gt 0 ] && [ "$FORCE" != 1 ]; then
-    echo "$active translation(s) are running; restarting would lose them. Re-run with -f to force."
-    exit 1
-fi
+# Fast-forward only: a server checkout must never create merge commits.
+pull_latest() {
+    if [ "${SKIP_PULL:-0}" = 1 ]; then
+        echo "git: pull skipped (SKIP_PULL=1)"
+        return 0
+    fi
+    local before after
+    before=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null)
+    echo "git: pulling in $REPO_DIR"
+    if ! git -C "$REPO_DIR" pull --ff-only; then
+        echo "git: pull failed; nothing was stopped. Fix the repo (git status) or re-run with SKIP_PULL=1."
+        return 1
+    fi
+    after=$(git -C "$REPO_DIR" rev-parse --short HEAD)
+    if [ "$before" = "$after" ]; then
+        echo "git: already up to date at $after"
+    else
+        echo "git: updated $before -> $after"
+    fi
+}
 
-# Gateway first (it depends on the API), then the API.
-stop_port "gateway" "$GATEWAY_PORT" || { echo "gateway: could not stop"; exit 1; }
-stop_port "api" "$API_PORT" || { echo "api: could not stop"; exit 1; }
+main() {
+    active=$(curl -s -m 3 "http://127.0.0.1:$API_PORT/health" 2>/dev/null \
+        | sed -n 's/.*"active_tasks": *\([0-9][0-9]*\).*/\1/p')
+    if [ "${active:-0}" -gt 0 ] && [ "$FORCE" != 1 ]; then
+        echo "$active translation(s) are running; restarting would lose them. Re-run with -f to force."
+        return 1
+    fi
 
-mkdir -p "$LOG_DIR"
-status=0
+    # Pull before touching the running services, so a failed pull leaves them up.
+    pull_latest || return 1
 
-start_detached bash "$DIR/start-api.sh" "$API_LOG"
-wait_listen "api" "$API_PORT" 60 "$API_LOG" || status=1
-if [ "$status" = 0 ]; then
-    echo "api health: $(curl -s -m 5 "http://127.0.0.1:$API_PORT/health" || echo FAILED)"
-    # The gateway builds first (go build), so allow more time.
-    start_detached sh "$DIR/start-gateway.sh" "$GATEWAY_LOG"
-    wait_listen "gateway" "$GATEWAY_PORT" 180 "$GATEWAY_LOG" || status=1
-else
-    echo "gateway: not started because the API failed"
-fi
+    # Gateway first (it depends on the API), then the API.
+    stop_port "gateway" "$GATEWAY_PORT" || { echo "gateway: could not stop"; return 1; }
+    stop_port "api" "$API_PORT" || { echo "api: could not stop"; return 1; }
 
-echo "logs: $API_LOG  $GATEWAY_LOG"
-exit "$status"
+    mkdir -p "$LOG_DIR"
+    local status=0
+
+    start_detached bash "$DIR/start-api.sh" "$API_LOG"
+    wait_listen "api" "$API_PORT" 60 "$API_LOG" || status=1
+    if [ "$status" = 0 ]; then
+        echo "api health: $(curl -s -m 5 "http://127.0.0.1:$API_PORT/health" || echo FAILED)"
+        # The gateway builds first (go build), so allow more time.
+        start_detached sh "$DIR/start-gateway.sh" "$GATEWAY_LOG"
+        wait_listen "gateway" "$GATEWAY_PORT" 180 "$GATEWAY_LOG" || status=1
+    else
+        echo "gateway: not started because the API failed"
+    fi
+
+    echo "logs: $API_LOG  $GATEWAY_LOG"
+    return "$status"
+}
+
+# One line, so bash never reads past it if git pull rewrites this file.
+main "$@"; exit $?

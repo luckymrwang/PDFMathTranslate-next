@@ -53,6 +53,7 @@ async function run() {
   vm.runInNewContext(fs.readFileSync(path.join(root, 'pages/index/index.js'), 'utf8'), sandbox)
   page.setData = values => Object.assign(page.data, values)
   page.availableEngines = new Set(['GPT-6'])
+  page.data.engine = 'GPT-6'
   page.data.orderReady = true
   page.quotedJob = { orderID: 'server-order', engine: 'GPT-6' }
   await page.confirmTranslation()
