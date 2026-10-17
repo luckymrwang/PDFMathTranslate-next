@@ -250,6 +250,28 @@ async function run() {
   page.data.orderReady = true
   await page.confirmTranslation()
   assert.equal(sentPlatform, undefined, 'Other platforms send no platform marker')
+  // Payment sheet: Skyline collapses a scroll-view without a height, so the body always gets
+  // the measured content height, capped so the pinned footer stays on screen.
+  let measuredHeight = 500
+  sandbox.wx.nextTick = fn => fn()
+  sandbox.wx.getWindowInfo = () => ({ windowHeight: 600, windowWidth: 375 })
+  sandbox.wx.createSelectorQuery = () => {
+    const query = { select: () => ({ boundingClientRect: () => query }), exec: done => done([{ height: measuredHeight }]) }
+    return query
+  }
+  page.data.paymentSheet = true
+  page.fitPaymentBody()
+  assert.equal(page.data.paymentBodyHeight, 290, 'Tall content is capped at screen height minus the header/footer allowance')
+  measuredHeight = 200.4
+  page.fitPaymentBody()
+  assert.equal(page.data.paymentBodyHeight, 201, 'Short content gets exactly its own height: never collapsed, no blank gap')
+  measuredHeight = 0
+  page.fitPaymentBody()
+  assert.equal(page.data.paymentBodyHeight, 201, 'A zero measurement (not laid out yet) is ignored')
+  page.data.paymentSheet = false
+  measuredHeight = 500
+  page.fitPaymentBody()
+  assert.equal(page.data.paymentBodyHeight, 201, 'A closed sheet is not measured')
   vm.runInNewContext(fs.readFileSync(path.join(root, 'pages/history/history.js'), 'utf8'), { ...sandbox })
   page.setData = values => Object.assign(page.data, values)
   page.alive = true
