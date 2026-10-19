@@ -42,14 +42,22 @@ class BingTranslator(BaseTranslator):
         )[0]
         return url, ig, iid, key, token
 
+    def do_translate(self, text, rate_limit_params: dict = None):
+        # Bing accepts at most 1000 characters; translate long paragraphs in pieces
+        # instead of truncating them, which silently dropped the rest of the text.
+        chunks = _split_text(text, BING_MAX_CHARS)
+        if len(chunks) == 1:
+            return self._translate_chunk(text)
+        joiner = "" if self.lang_out.lower().startswith(("zh", "ja", "ko")) else " "
+        return joiner.join(self._translate_chunk(chunk) for chunk in chunks)
+
     @retry(
         retry=retry_if_exception(Exception),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=15),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
-    def do_translate(self, text, rate_limit_params: dict = None):
-        text = text[:1000]  # bing translate max length
+    def _translate_chunk(self, text):
         url, ig, iid, key, token = self.find_sid()
         response = self.session.post(
             f"{url}ttranslatev3?IG={ig}&IID={iid}",
@@ -64,3 +72,33 @@ class BingTranslator(BaseTranslator):
         )
         response.raise_for_status()
         return response.json()[0]["translations"][0]["text"]
+
+
+BING_MAX_CHARS = 1000
+# A sentence with its own trailing punctuation and whitespace, so pieces rejoin to the exact text.
+_SENTENCE = re.compile(r".+?(?:[.!?;]+(?:\s+|$)|[。！？；]+\s*|\n+|$)", re.S)
+
+
+def _split_text(text: str, limit: int) -> list[str]:
+    """Split text into pieces of at most `limit` characters, preferring sentence ends."""
+    if len(text) <= limit:
+        return [text]
+    chunks, current = [], ""
+    for sentence in _SENTENCE.findall(text):
+        while len(sentence) > limit:
+            # A single sentence longer than the limit: cut at the last space before it.
+            if current:
+                chunks.append(current)
+                current = ""
+            cut = sentence.rfind(" ", 0, limit)
+            cut = cut + 1 if cut > 0 else limit
+            chunks.append(sentence[:cut])
+            sentence = sentence[cut:]
+        if len(current) + len(sentence) <= limit:
+            current += sentence
+        else:
+            chunks.append(current)
+            current = sentence
+    if current:
+        chunks.append(current)
+    return [chunk.strip() for chunk in chunks if chunk.strip()]
