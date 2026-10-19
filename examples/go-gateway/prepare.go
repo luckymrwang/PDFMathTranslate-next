@@ -99,9 +99,9 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := r.Context().Value(ctxKeyOpenID).(string)
-	r.Body = http.MaxBytesReader(w, r.Body, 51<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 31<<20)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeError(w, 400, "PDF 最大 50 MB")
+		writeError(w, 400, "PDF 最大 30 MB")
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
@@ -129,8 +129,8 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if header.Size <= 0 || header.Size > 50<<20 || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
-		writeError(w, 400, "请选择不超过 50 MB 的 PDF")
+	if header.Size <= 0 || header.Size > 30<<20 || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
+		writeError(w, 400, "请选择不超过 30 MB 的 PDF")
 		return
 	}
 	// Reserve a slot before disk/network work to bound concurrent uploads per user.

@@ -64,6 +64,22 @@ async function run() {
   assert.equal(failed.page.data.error, 'Engine failed')
   assert.equal(failed.timer(), null)
 
+  let queueStatus = { progress: 0, state: 'queued', stage: 'queued', queue_position: 2 }
+  const queued = harness(async () => queueStatus)
+  await queued.page.fetchStatus()
+  assert.equal(queued.page.data.status, '排队等待中')
+  assert.match(queued.page.data.detail, /第 2 位/)
+  assert.equal(queued.page.data.progress, 0)
+  assert.ok(queued.page.data.steps.every(step => step.state === ''))
+  assert.equal(queued.timer().delay, 2000)
+  queueStatus = { progress: 0, state: 'running', stage: '正在解析', queue_position: 0 }
+  await queued.page.fetchStatus()
+  assert.notEqual(queued.page.data.status, '排队等待中')
+  assert.equal(queued.page.data.detail, '正在解析')
+  const recovering = harness(async () => ({ progress: 0, state: 'queued', stage: '正在恢复翻译任务' }))
+  await recovering.page.fetchStatus()
+  assert.equal(recovering.page.data.detail, '正在恢复翻译任务')
+
   let resolve, calls = 0
   const pending = harness(() => { calls++; return new Promise(r => { resolve = r }) })
   const request = pending.page.fetchStatus()

@@ -267,6 +267,8 @@ async def _run_translation(task: TaskState, settings: SettingsModel) -> None:
     """Drive do_translate_async_stream and publish serialized events."""
     sem = _get_semaphore()
     async with sem:
+        # Holding a slot means running, even before the first progress event arrives.
+        task.status = "running"
         try:
             async for event in do_translate_async_stream(settings, task.input_path):
                 task.publish(_serialize_event(event, task))
@@ -441,8 +443,8 @@ async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[
         size = 0
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             size += len(chunk)
-            if size > 50 * 1024 * 1024:
-                raise HTTPException(status_code=413, detail="PDF exceeds 50 MB")
+            if size > 30 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="PDF exceeds 30 MB")
             tmp.write(chunk)
         tmp.flush()
 
@@ -517,6 +519,23 @@ async def create_translation(
         return result
 
 
+def _queue_position(task: TaskState) -> int | None:
+    """1-based place in the waiting line (1 = next to run); None unless queued.
+
+    _tasks keeps insertion order and the semaphore wakes waiters first-in first-out,
+    so the queued tasks created before this one are exactly the ones ahead of it.
+    """
+    if task.status != "queued" or task.done:
+        return None
+    ahead = 0
+    for other in _tasks.values():
+        if other is task:
+            break
+        if other.status == "queued" and not other.done:
+            ahead += 1
+    return ahead + 1
+
+
 def _require_task(task_id: str) -> TaskState:
     task = _tasks.get(task_id)
     if task is None:
@@ -530,6 +549,7 @@ async def get_status(task_id: str) -> dict[str, Any]:
     return {
         "id": task.task_id,
         "state": task.status,
+        "queue_position": _queue_position(task),
         "stage": task.stage,
         "progress": task.progress,
         "error": task.error,

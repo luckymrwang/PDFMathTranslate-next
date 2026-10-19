@@ -100,8 +100,8 @@ func (s *Server) handleRepreparePDF(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 	hash := sha256.New()
-	size, err := io.Copy(hash, io.LimitReader(file, (50<<20)+1))
-	if err != nil || size < 1 || size > 50<<20 || hex.EncodeToString(hash.Sum(nil)) != order.FileHash {
+	size, err := io.Copy(hash, io.LimitReader(file, (30<<20)+1))
+	if err != nil || size < 1 || size > 30<<20 || hex.EncodeToString(hash.Sum(nil)) != order.FileHash {
 		writeError(w, 410, "原文件完整性校验失败，请重新上传 PDF")
 		return
 	}

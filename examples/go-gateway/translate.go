@@ -89,9 +89,9 @@ func (s *Server) handleTranslateSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Limit the complete request and never trust model settings supplied by the
 	// client. ParseMultipartForm spills larger files to a temporary file.
-	r.Body = http.MaxBytesReader(w, r.Body, 51<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 31<<20)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid or oversized upload (max PDF 50 MB)")
+		writeError(w, http.StatusBadRequest, "invalid or oversized upload (max PDF 30 MB)")
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
@@ -101,8 +101,8 @@ func (s *Server) handleTranslateSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	if header.Size > 50<<20 || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
-		writeError(w, http.StatusBadRequest, "PDF must be at most 50 MB")
+	if header.Size > 30<<20 || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
+		writeError(w, http.StatusBadRequest, "PDF must be at most 30 MB")
 		return
 	}
 	magic := make([]byte, 5)
