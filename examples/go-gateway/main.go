@@ -72,6 +72,7 @@ func main() {
 	mux.Handle("/api/me", srv.authRequired(http.HandlerFunc(srv.handleMe)))
 	mux.Handle("/api/engines", srv.authRequired(http.HandlerFunc(srv.handleEngines)))
 	mux.Handle("/api/engines/check", srv.authRequired(http.HandlerFunc(srv.handleEngineCheck)))
+	mux.Handle("/api/oversize", srv.authRequired(http.HandlerFunc(srv.handleOversize)))
 	mux.Handle("/pay/prepare", srv.authRequired(http.HandlerFunc(srv.handlePreparePDF)))
 	mux.Handle("/pay/prepare/order", srv.authRequired(http.HandlerFunc(srv.handleRepreparePDF)))
 	mux.Handle("/pay/order/prepared", srv.authRequired(http.HandlerFunc(srv.handlePreparedOrder)))

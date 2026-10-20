@@ -16,7 +16,7 @@ conda activate "$CONDA_ENV"
 export PDF2ZH_API_HOST=127.0.0.1          # localhost only; the gateway proxies it
 
 # --- tuning for an 8-core / 8G box ---
-export PDF2ZH_MAX_CONCURRENT=3            # translation jobs running at once; the rest queue
+export PDF2ZH_MAX_CONCURRENT=2            # heavy PDFs can use 4G+ RAM each; the rest queue
 export PDF2ZH_QPS=4                       # upstream requests/sec per job (x MAX_CONCURRENT in total)
 export PDF2ZH_POOL_MAX_WORKERS=4          # per-job paragraph concurrency
 export PDF2ZH_NO_MONO=true                # emit dual-language PDF only

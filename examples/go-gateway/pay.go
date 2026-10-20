@@ -151,8 +151,11 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 429, "操作过于频繁，请一分钟后重试")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 31<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxPDFBytes+1<<20)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		if isBodyTooLarge(err) {
+			logOversize(r, "upload", r.ContentLength)
+		}
 		writeError(w, 400, "PDF 最大 30 MB")
 		return
 	}
@@ -163,7 +166,10 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	if header.Size <= 0 || header.Size > 30<<20 || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
+	if header.Size > maxPDFBytes {
+		logOversize(r, "upload", header.Size)
+	}
+	if header.Size <= 0 || header.Size > maxPDFBytes || !strings.EqualFold(filepath.Ext(header.Filename), ".pdf") {
 		writeError(w, 400, "请选择不超过 30 MB 的 PDF")
 		return
 	}
