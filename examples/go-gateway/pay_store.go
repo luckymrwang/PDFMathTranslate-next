@@ -118,7 +118,9 @@ type PayOrder struct {
 	Engine, LangIn, LangOut, FilePath, FileHash, Name, Attach, SignData string
 	State, WxOrderID, TaskID                                            string
 	Provided                                                            bool
-	CreatedAt, LastQuery                                                int64
+	// Trial orders are free, never touch WeChat payment, and translate only page 1.
+	Trial                bool
+	CreatedAt, LastQuery int64
 	// Delivery is "" while translating, "archived" once results are durable, "failed" when retries are exhausted.
 	Delivery           string
 	FailReason         string
@@ -217,6 +219,34 @@ func (s *OrderStore) add(order PayOrder) error {
 	}
 	return s.saveLocked(order)
 }
+
+func (s *OrderStore) hasTrial(owner string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, order := range s.orders {
+		if order.Trial && order.OpenID == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// addTrial atomically enforces one free trial per user.
+func (s *OrderStore) addTrial(order PayOrder) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.orders {
+		if existing.Trial && existing.OpenID == order.OpenID {
+			return errTrialUsed
+		}
+	}
+	if _, ok := s.orders[order.ID]; ok {
+		return errors.New("duplicate order")
+	}
+	return s.saveLocked(order)
+}
+
+var errTrialUsed = errors.New("trial already used")
 
 func (s *OrderStore) get(id string) (PayOrder, bool) {
 	s.mu.Lock()

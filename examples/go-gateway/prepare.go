@@ -288,10 +288,19 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		LangIn    string `json:"lang_in"`
 		LangOut   string `json:"lang_out"`
 		Platform  string `json:"platform"`
+		Trial     bool   `json:"trial"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil {
 		writeError(w, 400, "invalid settings")
 		return
+	}
+	if input.Trial {
+		// The engine is fixed server-side so a trial can never use a paid engine.
+		input.Engine = trialEngine
+		if s.pay.store.hasTrial(owner) {
+			writeError(w, 409, "免费试用已使用过")
+			return
+		}
 	}
 	languages := map[string]bool{"zh": true, "en": true, "ja": true, "ko": true, "fr": true, "de": true, "es": true}
 	if !languages[input.LangIn] || !languages[input.LangOut] || input.LangIn == input.LangOut {
@@ -323,6 +332,27 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 	if s.pay.store.recentOrderCount(owner) >= 10 {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, 429, "操作过于频繁，请一分钟后重试")
+		return
+	}
+	if input.Trial {
+		id, err := newTradeNo()
+		if err != nil {
+			writeError(w, 500, "无法创建订单")
+			return
+		}
+		order := PayOrder{ID: id, OpenID: owner, Pages: trialPages, Engine: input.Engine,
+			LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
+			Name: file.Name, State: "paid", Provided: true, Trial: true, CreatedAt: time.Now().Unix(), Attach: id}
+		if err := s.pay.store.addTrial(order); err != nil {
+			if errors.Is(err, errTrialUsed) {
+				writeError(w, 409, "免费试用已使用过")
+			} else {
+				writeError(w, 500, "订单保存失败")
+			}
+			return
+		}
+		saved = true
+		writeJSON(w, 200, map[string]any{"order": orderView(order)})
 		return
 	}
 	// The client platform only decides rounding up; claiming iOS can never lower the price.

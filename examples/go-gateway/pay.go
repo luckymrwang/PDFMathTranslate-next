@@ -35,8 +35,14 @@ func orderView(order PayOrder) map[string]any {
 		"pages":          order.PageCount(),
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
-		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt}
+		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial}
 }
+
+// trialPages is how many leading pages a free trial translates.
+const trialPages = 1
+
+// trialEngine is the free engine used for trials; it is always configured.
+const trialEngine = "Bing"
 
 func paymentData(order PayOrder, appKey, sessionKey string) map[string]string {
 	return map[string]string{"mode": "short_series_goods", "signData": order.SignData,
@@ -57,9 +63,11 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 	for engine, p := range s.pay.cfg.EngineProducts {
 		enginePrices[engine] = p.Price
 	}
+	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
 	writeJSON(w, 200, map[string]any{"enabled": true, "standard_price_fen": s.pay.cfg.StandardPrice,
 		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices,
-		"ios_unit_fen": s.pay.cfg.IOSUnit, "ios_min_fen": iosMinFen})
+		"ios_unit_fen": s.pay.cfg.IOSUnit, "ios_min_fen": iosMinFen,
+		"trial_available": !s.pay.store.hasTrial(openid), "trial_pages": trialPages, "trial_engine": trialEngine})
 }
 
 // uploadFile is also used for server-side PDF inspection. Never send local
@@ -449,6 +457,9 @@ func (s *Server) reconcileOrder(ctx context.Context, id string) error {
 	if !ok {
 		return errors.New("order not found")
 	}
+	if order.Trial {
+		return nil
+	}
 	verified, err := s.pay.client.query(ctx, order)
 	if err != nil {
 		return err
@@ -545,9 +556,12 @@ func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, e
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultSubmitTimeout)
 	defer cancel()
-	body, err := s.uploadFile(ctx, "/v1/translate", order.FilePath, order.Name,
-		map[string]any{"lang_in": order.LangIn, "lang_out": order.LangOut, "qps": 4,
-			"skip_image_translation": true, "translate_engine_settings": settings}, key)
+	params := map[string]any{"lang_in": order.LangIn, "lang_out": order.LangOut, "qps": 4,
+		"skip_image_translation": true, "translate_engine_settings": settings}
+	if order.Trial {
+		params["pages"] = strconv.Itoa(trialPages)
+	}
+	body, err := s.uploadFile(ctx, "/v1/translate", order.FilePath, order.Name, params, key)
 	if err != nil {
 		return "", err
 	}
@@ -606,7 +620,7 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 				cancel()
 				continue
 			}
-			if queryWeChat && (order.State == "pending" || order.State == "paid" || order.State == "submitted") {
+			if queryWeChat && !order.Trial && (order.State == "pending" || order.State == "paid" || order.State == "submitted") {
 				checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				if err := s.reconcileOrder(checkCtx, order.ID); err != nil {
 					log.Printf("virtual payment reconcile failed (order=%s): %v", order.ID, err)
