@@ -220,7 +220,13 @@ func (s *OrderStore) add(order PayOrder) error {
 	return s.saveLocked(order)
 }
 
+// trialUnlimited lifts the one-trial-per-user limit for testing (TRIAL_UNLIMITED=true).
+func trialUnlimited() bool { return os.Getenv("TRIAL_UNLIMITED") == "true" }
+
 func (s *OrderStore) hasTrial(owner string) bool {
+	if trialUnlimited() {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, order := range s.orders {
@@ -236,7 +242,7 @@ func (s *OrderStore) addTrial(order PayOrder) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, existing := range s.orders {
-		if existing.Trial && existing.OpenID == order.OpenID {
+		if existing.Trial && existing.OpenID == order.OpenID && !trialUnlimited() {
 			return errTrialUsed
 		}
 	}
