@@ -25,6 +25,8 @@ class BingTranslator(BaseTranslator):
         rate_limiter: BaseRateLimiter,
     ):
         super().__init__(settings, rate_limiter)
+        # Translations cached before long text was split are truncated; a new key skips them.
+        self.add_cache_impact_parameters("split_chars", BING_MAX_CHARS)
         self.session = requests.Session()
         self.endpoint = "https://www.bing.com/translator"
         self.headers = {
