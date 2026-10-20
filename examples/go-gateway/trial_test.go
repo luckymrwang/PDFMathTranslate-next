@@ -84,8 +84,8 @@ func TestFreeTrialIsOncePerUserAndTranslatesFirstPage(t *testing.T) {
 	if _, err := s.startPaidOrder(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
-	if forwarded["pages"] != "1" {
-		t.Fatal("trial must translate only page 1:", forwarded)
+	if forwarded["pages"] != "1-1" {
+		t.Fatal("trial must translate only the first page:", forwarded)
 	}
 	if err := s.reconcileOrder(context.Background(), id); err != nil {
 		t.Fatal("trial must not query WeChat:", err)

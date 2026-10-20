@@ -559,7 +559,7 @@ func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, e
 	params := map[string]any{"lang_in": order.LangIn, "lang_out": order.LangOut, "qps": 4,
 		"skip_image_translation": true, "translate_engine_settings": settings}
 	if order.Trial {
-		params["pages"] = strconv.Itoa(trialPages)
+		params["pages"] = "1-" + strconv.Itoa(trialPages)
 	}
 	body, err := s.uploadFile(ctx, "/v1/translate", order.FilePath, order.Name, params, key)
 	if err != nil {
