@@ -98,6 +98,7 @@ class TranslateRequest(BaseModel):
     max_pages_per_part: int | None = Field(default=DEFAULT_MAX_PAGES_PER_PART)
     pool_max_workers: int | None = Field(default=DEFAULT_POOL_MAX_WORKERS)
     skip_image_translation: bool = Field(default=True)
+    translate_table_text: bool = Field(default=False)
     watermark_output_mode: Literal["watermarked", "no_watermark", "both"] = Field(
         default="no_watermark"
     )
@@ -184,6 +185,7 @@ def _build_settings(req: TranslateRequest, output_dir: Path) -> SettingsModel:
     settings.pdf.no_mono = req.no_mono
     settings.pdf.no_dual = req.no_dual
     settings.pdf.skip_image_translation = req.skip_image_translation
+    settings.pdf.translate_table_text = req.translate_table_text
     settings.pdf.watermark_output_mode = req.watermark_output_mode
     return settings
 
