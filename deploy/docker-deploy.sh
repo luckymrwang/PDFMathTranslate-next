@@ -1,6 +1,7 @@
 #!/bin/bash
-# Docker-based deploy: guard against running translations -> git pull ->
-# docker compose build -> docker compose up -d -> wait for health.
+# Server deploy: guard against running translations -> git pull ->
+# docker compose pull -> docker compose up -d -> wait for health.
+# Images are built and pushed from the dev machine (deploy/docker-push.sh).
 # Replaces restart-all.sh for the compose stack (that script remains the
 # non-Docker fallback after `docker compose down`).
 # Usage: deploy/docker-deploy.sh [-f]
@@ -16,9 +17,9 @@ cd "$DIR"   # docker-compose.yml lives here
 FORCE=0
 [ "${1:-}" = "-f" ] && FORCE=1
 
-# Query the compose'd API's /health from inside the container: the API port
-# is not published, and exec needs no extra image pull (unlike docker run
-# --network). A stopped or missing stack reports 0.
+# Query the API's /health from inside the container (the API binds
+# 127.0.0.1 on the host network; exec needs no extra tooling). A stopped
+# or missing stack reports 0.
 active_tasks() {
     docker compose exec -T pdf2zh python -c \
       "import json,urllib.request;print(json.load(urllib.request.urlopen('http://127.0.0.1:11008/health',timeout=3))['active_tasks'])" \
@@ -69,16 +70,13 @@ main() {
         return 1
     fi
 
-    # Pull before touching the running stack, so a failed pull leaves it up.
+    # Pull code and images before touching the running stack, so a failed
+    # pull leaves it up.
     pull_latest || return 1
-
-    # Build while the old containers keep serving; recreate only at `up -d`.
-    # CACHEBUST busts the babeldoc refresh layer (replaces the random.org ADD
-    # hack in the root Dockerfile). Date granularity = at most one refresh/day.
-    if ! CACHEBUST="${CACHEBUST:-$(date +%Y%m%d%H)}" docker compose build; then
-        echo "build failed; old containers keep running"
+    docker compose pull || {
+        echo "image pull failed; nothing was touched"
         return 1
-    fi
+    }
 
     docker compose up -d || return 1
 

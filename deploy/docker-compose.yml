@@ -1,10 +1,12 @@
 # Docker Compose stack: Python translation API + Go gateway.
 # Run from this directory (deploy/):  docker compose up -d
-# Deploy (pull + build + recreate):   deploy/docker-deploy.sh
+# Server deploy (pull + recreate):    deploy/docker-deploy.sh
+# Build & push images (dev machine):  deploy/docker-push.sh
 #
-# The gateway is the only published service (loopback :8080) — the host's
-# reverse proxy terminates TLS in front of it. The API stays on the compose
-# network; the deploy script queries it via `docker compose exec`.
+# Both containers use host networking: the gateway listens on host :8080
+# (the host reverse proxy terminates TLS in front of it, unchanged), and the
+# API binds 127.0.0.1:11008 so only the gateway can reach it — the same
+# network topology as the previous bare-process deploy.
 
 name: pdfmath
 
@@ -16,12 +18,13 @@ services:
       dockerfile: deploy/Dockerfile.api
       args:
         CACHEBUST: ${CACHEBUST:-1}
-    image: pdfmath/pdf2zh:local
+    image: luckymrwang/pdf2zh:latest
     restart: unless-stopped
+    network_mode: host
     environment:
-      # Must bind 0.0.0.0 inside the container (start-api.sh's 127.0.0.1
-      # bind was a host-process thing and would be unreachable here).
-      PDF2ZH_API_HOST: "0.0.0.0"
+      # Host network: bind loopback only — the gateway reaches it via
+      # 127.0.0.1, nothing else can (mirrors the old start-api.sh bind).
+      PDF2ZH_API_HOST: "127.0.0.1"
       PDF2ZH_API_PORT: "11008"
       # Tuning for an 8-core / 8G box, mirrors deploy/start-api.sh.
       PDF2ZH_MAX_CONCURRENT: "2"
@@ -36,28 +39,26 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    # No ports: reachable only on the compose network.
 
   gateway:
     platform: linux/amd64   # the server is amd64; pinned so local (arm) builds match
     build:
       context: ../examples/go-gateway
-    image: pdfmath/go-gateway:local
+    image: luckymrwang/go-gateway:latest
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:8080:8080"   # host reverse proxy (TLS) fronts this
+    network_mode: host   # listens on host :8080 directly; no ports mapping
     env_file:
       - ../examples/go-gateway/.env   # secrets; gitignored, lives on the server
     environment:   # compose precedence: these override env_file
-      PDF2ZH_API_URL: http://pdf2zh:11008
+      PDF2ZH_API_URL: http://127.0.0.1:11008
       VIRTUALPAY_DATA_DIR: /data
       # Keep in sync with the gateway Dockerfile HEALTHCHECK port.
       GATEWAY_ADDR: ":8080"
     volumes:
-      - virtualpay-data:/data   # orders, uploads, results — persistent
+      # Bind mount of the pre-existing order store (root-owned on the host);
+      # existing orders survive the migration from the bare-process deploy.
+      - ../examples/go-gateway/data/virtualpay:/data
+    user: "0:0"   # the host-side data dir is root-owned
     depends_on:
       pdf2zh:
         condition: service_healthy
-
-volumes:
-  virtualpay-data:
