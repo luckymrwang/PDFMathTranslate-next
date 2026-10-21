@@ -609,7 +609,12 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 					unlock()
 				}
 			}
-			if order.Delivery != "" {
+			if order.Delivery != "" || order.State == "closed" || order.State == "refunded" {
+				cleanCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				if err := s.expireOrder(cleanCtx, order.ID); err != nil {
+					log.Printf("retention cleanup failed (order=%s): %v", order.ID, err)
+				}
+				cancel()
 				continue
 			}
 			if order.State == "pending" && time.Since(time.Unix(order.CreatedAt, 0)) > pendingOrderTTL {

@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -208,6 +209,49 @@ func (c *S3Client) PutObject(ctx context.Context, key, contentType string, body 
 	return nil
 }
 
+// DeleteObject removes an object; a missing object counts as deleted.
+func (c *S3Client) DeleteObject(ctx context.Context, key string) error {
+	host := c.objectHost()
+	canonicalURI := uriEncodePath(c.objectPath(key))
+	rawURL := c.cfg.scheme + "://" + host + canonicalURI
+
+	now := time.Now().UTC()
+	amzDate := now.Format("20060102T150405Z")
+	dateStamp := now.Format("20060102")
+	const payloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // SHA-256 of an empty body
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Host", host)
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	req.Header.Set("X-Amz-Date", amzDate)
+
+	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
+	canonicalHeaders := "host:" + host + "\n" +
+		"x-amz-content-sha256:" + payloadHash + "\n" +
+		"x-amz-date:" + amzDate + "\n"
+	canonicalRequest := strings.Join([]string{
+		http.MethodDelete, canonicalURI, "", canonicalHeaders, signedHeaders, payloadHash,
+	}, "\n")
+	req.Header.Set("Authorization", c.authorizationHeader(canonicalRequest, amzDate, dateStamp, signedHeaders))
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("s3 delete %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// errObjectNotFound means the object was already removed, e.g. by a bucket lifecycle rule.
+var errObjectNotFound = errors.New("object not found")
+
 // GetObject downloads an object; the caller must close the response body.
 func (c *S3Client) GetObject(ctx context.Context, key string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.PresignGetURL(key), nil)
@@ -220,6 +264,9 @@ func (c *S3Client) GetObject(ctx context.Context, key string) (*http.Response, e
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, errObjectNotFound
+		}
 		return nil, fmt.Errorf("s3 get %d", resp.StatusCode)
 	}
 	return resp, nil

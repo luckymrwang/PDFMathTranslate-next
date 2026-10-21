@@ -195,6 +195,62 @@ func (s *Server) deleteUpstreamTask(ctx context.Context, taskID string) {
 	}
 }
 
+// resultRetention is how long results and uploaded PDFs are kept (RESULT_RETENTION_HOURS, default 72).
+func resultRetention() time.Duration {
+	hours, err := strconv.Atoi(os.Getenv("RESULT_RETENTION_HOURS"))
+	if err != nil || hours <= 0 {
+		hours = 72
+	}
+	return time.Duration(hours) * time.Hour
+}
+
+// expireOrder deletes the files of an order past the retention period and keeps
+// the order record for reconciliation. In-progress orders are never touched.
+func (s *Server) expireOrder(ctx context.Context, id string) error {
+	unlock, ok := s.pay.locks.acquire(id, false)
+	if !ok {
+		return nil
+	}
+	defer unlock()
+	order, ok := s.pay.store.get(id)
+	if !ok || time.Since(time.Unix(order.CreatedAt, 0)) < resultRetention() {
+		return nil
+	}
+	finished := order.Delivery == "archived" || order.Delivery == "failed" ||
+		order.State == "closed" || order.State == "refunded"
+	hasFiles := order.FilePath != "" || order.MonoFile != "" || order.DualFile != "" ||
+		order.MonoKey != "" || order.DualKey != ""
+	if !finished || !hasFiles {
+		return nil
+	}
+	for _, key := range []string{order.MonoKey, order.DualKey} {
+		if key == "" {
+			continue
+		}
+		if s.storage == nil {
+			return errors.New("object storage not configured")
+		}
+		if err := s.storage.DeleteObject(ctx, key); err != nil {
+			return err
+		}
+	}
+	for _, path := range []string{order.MonoFile, order.DualFile, order.FilePath} {
+		if path != "" {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	return s.pay.store.update(id, func(current *PayOrder) error {
+		if current.Delivery == "archived" {
+			current.Delivery = "expired"
+		}
+		current.MonoFile, current.DualFile, current.FilePath = "", "", ""
+		current.MonoKey, current.DualKey = "", ""
+		return nil
+	})
+}
+
 func (s *Server) archivePaidResult(ctx context.Context, order PayOrder) error {
 	dir := filepath.Join(s.pay.store.dir, "results")
 	mono, err := s.saveResult(ctx, order.TaskID, "mono", filepath.Join(dir, order.ID+"-mono.pdf"))
@@ -313,6 +369,10 @@ func (s *Server) paidOrderForTask(taskID string) (PayOrder, bool) {
 // results survive worker restarts and TTL cleanup. Returns false to fall back
 // to the plain proxy.
 func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order PayOrder, taskID, sub string) bool {
+	if order.Delivery == "expired" && r.Method == http.MethodGet {
+		writeError(w, http.StatusGone, "译文已超过保留期，请重新下单")
+		return true
+	}
 	switch {
 	case r.Method == http.MethodDelete && sub == "":
 		writeError(w, http.StatusConflict, "已支付的翻译任务不可取消")
@@ -326,6 +386,10 @@ func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order Pa
 		filename := fmt.Sprintf("attachment; filename=%q", order.ID+"-"+sub+".pdf")
 		if path == "" && key != "" && s.storage != nil {
 			resp, err := s.storage.GetObject(r.Context(), key)
+			if errors.Is(err, errObjectNotFound) {
+				writeError(w, http.StatusGone, "译文已超过保留期，请重新下单")
+				return true
+			}
 			if err != nil {
 				log.Printf("object storage download failed (order=%s): %v", order.ID, err)
 				writeError(w, http.StatusBadGateway, "result storage unavailable")
