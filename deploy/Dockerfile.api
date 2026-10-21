@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+# API service image (pdf2zh --api). Build context: repository root
+# (compose: context: .., dockerfile: deploy/Dockerfile.api).
+# The root .dockerignore applies: .env (any level), .git, docs, tmp,
+# pdf2zh_files etc. never enter the context.
+
+########## Stage 1: build the virtualenv ##########
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS build
+WORKDIR /src
+RUN apt-get update && apt-get install --no-install-recommends -y build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# README.md is required by hatchling (readme = "README.md").
+COPY pyproject.toml README.md ./
+# Dependencies only — this layer is cached across source-only changes.
+RUN uv venv /opt/venv \
+    && uv pip install --python /opt/venv -r pyproject.toml
+
+# Install the package itself without re-resolving dependencies.
+COPY pdf2zh_next ./pdf2zh_next
+RUN uv pip install --python /opt/venv --no-deps .
+
+# Refresh babeldoc/pymupdf, mirroring the root Dockerfile but with a build
+# ARG instead of the random.org ADD (unreachable from CN networks, and its
+# timeout would fail the whole build). compose passes CACHEBUST per deploy.
+# bitstring<5: bitstring 5.0 removed BitStream, which babeldoc still imports
+# (babeldoc declares bitstring>=4.3.0 with no upper bound).
+ARG CACHEBUST=1
+RUN uv pip install --python /opt/venv --compile-bytecode -U \
+        "babeldoc>=0.6.2,<0.7.0" "pymupdf<1.25.3" "bitstring<5"
+
+########## Stage 2: minimal runtime ##########
+FROM python:3.13-slim-bookworm
+# Runtime shared libs (transitive deps of the babeldoc stack — the same set
+# the root Dockerfile proved necessary). build-essential stays in stage 1.
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        libgl1 libglib2.0-0 libxext6 libsm6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# The venv's bin/python resolves against this image's /usr/local/bin/python3.13
+# (same pinned 3.13 bookworm build as stage 1 — bump both images in lockstep).
+COPY --from=build /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    HOME=/root
+
+WORKDIR /tmp
+# Bake babeldoc assets (fonts, cmaps, models) into the image. Deliberately NOT
+# a named volume: an empty named volume copies image content only on FIRST
+# mount and never re-syncs, so it would pin stale assets after every rebuild.
+RUN babeldoc --version && babeldoc --warmup
+
+EXPOSE 11008
+# PDF2ZH_* tuning comes from deploy/docker-compose.yml (mirrors start-api.sh).
+CMD ["pdf2zh", "--api"]

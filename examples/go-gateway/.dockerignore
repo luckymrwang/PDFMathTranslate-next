@@ -1,0 +1,7 @@
+# Secrets and the 9 MB prebuilt binary must never reach the build daemon.
+.env
+go-gateway
+data/
+*_test.go
+*.test.cjs
+*.md

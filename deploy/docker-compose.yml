@@ -1,0 +1,63 @@
+# Docker Compose stack: Python translation API + Go gateway.
+# Run from this directory (deploy/):  docker compose up -d
+# Deploy (pull + build + recreate):   deploy/docker-deploy.sh
+#
+# The gateway is the only published service (loopback :8080) — the host's
+# reverse proxy terminates TLS in front of it. The API stays on the compose
+# network; the deploy script queries it via `docker compose exec`.
+
+name: pdfmath
+
+services:
+  pdf2zh:
+    platform: linux/amd64   # the server is amd64; pinned so local (arm) builds match
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+      args:
+        CACHEBUST: ${CACHEBUST:-1}
+    image: pdfmath/pdf2zh:local
+    restart: unless-stopped
+    environment:
+      # Must bind 0.0.0.0 inside the container (start-api.sh's 127.0.0.1
+      # bind was a host-process thing and would be unreachable here).
+      PDF2ZH_API_HOST: "0.0.0.0"
+      PDF2ZH_API_PORT: "11008"
+      # Tuning for an 8-core / 8G box, mirrors deploy/start-api.sh.
+      PDF2ZH_MAX_CONCURRENT: "2"
+      PDF2ZH_QPS: "4"
+      PDF2ZH_POOL_MAX_WORKERS: "4"
+      PDF2ZH_NO_MONO: "true"
+      PDF2ZH_MAX_PAGES_PER_PART: "50"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:11008/health',timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # No ports: reachable only on the compose network.
+
+  gateway:
+    platform: linux/amd64   # the server is amd64; pinned so local (arm) builds match
+    build:
+      context: ../examples/go-gateway
+    image: pdfmath/go-gateway:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # host reverse proxy (TLS) fronts this
+    env_file:
+      - ../examples/go-gateway/.env   # secrets; gitignored, lives on the server
+    environment:   # compose precedence: these override env_file
+      PDF2ZH_API_URL: http://pdf2zh:11008
+      VIRTUALPAY_DATA_DIR: /data
+      # Keep in sync with the gateway Dockerfile HEALTHCHECK port.
+      GATEWAY_ADDR: ":8080"
+    volumes:
+      - virtualpay-data:/data   # orders, uploads, results — persistent
+    depends_on:
+      pdf2zh:
+        condition: service_healthy
+
+volumes:
+  virtualpay-data:
