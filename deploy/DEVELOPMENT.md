@@ -116,6 +116,11 @@ docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 curl --fail https://dev.2026669.me/health
 ```
 
+如果宿主机文件已经是 `8080`，容器内仍显示 `18080`，可能是编辑器原子
+替换文件后，单文件 bind mount 仍引用旧 inode。此时直接 reload 会再次
+加载旧文件。应核对容器内实际文件，备份后同步开发域名路由，再 validate
+和 reload；不要仅凭宿主机文件判断配置已经生效。
+
 如果正式服务器还保留之前添加的 dev 域名路由，可在确认 DNS 和开发服务
 正常后移除该路由；不修改正式域名和正式支付回调的路由。
 
