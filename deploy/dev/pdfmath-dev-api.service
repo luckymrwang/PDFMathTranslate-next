@@ -14,7 +14,7 @@ Environment=PDF2ZH_MAX_CONCURRENT=1
 Environment=PDF2ZH_QPS=1
 Environment=PDF2ZH_POOL_MAX_WORKERS=1
 Environment=PDF2ZH_NO_MONO=true
-Environment=PDF2ZH_MAX_PAGES_PER_PART=10
+Environment=PDF2ZH_MAX_PAGES_PER_PART=50
 ExecStart=/root/miniconda3/envs/babledoc/bin/python -m pdf2zh_next.main --api
 Restart=on-failure
 RestartSec=5
