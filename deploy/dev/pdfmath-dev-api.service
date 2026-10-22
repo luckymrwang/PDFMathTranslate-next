@@ -22,7 +22,9 @@ StateDirectory=pdfmath-dev
 StateDirectoryMode=0700
 CPUQuota=80%
 MemoryMax=1400M
-MemorySwapMax=512M
+# The 2GB development host has 4GB swap. PDF workers can exceed resident RAM
+# even for one page, so allow paging while retaining the physical-memory cap.
+MemorySwapMax=2G
 TimeoutStopSec=30
 
 [Install]

@@ -25,8 +25,9 @@
 
 服务模板位于 `deploy/dev/pdfmath-dev-{api,gateway}.service`，绑定开发机
 回环地址 `8080` / `11009`，订单和翻译文件位于 `/var/lib/pdfmath-dev`。
-API 限制 1 个并发、1400MB 内存，优先使用小 PDF 测试。`MemoryMax`
-仅限制服务内存，不代表大文件一定能运行成功。
+API 限制 1 个并发、1400MB 物理内存及 2GB swap（开发机已有 4GB swap），
+优先使用小 PDF 测试。PDF 工作进程即使处理一页也可能超出物理内存上限，
+需要使用 swap，速度会变慢；上述限制不代表大文件一定能运行成功。
 
 构建 Linux amd64 网关（可在开发电脑交叉编译），将二进制安装到开发机
 `/usr/local/lib/pdfmath-dev/go-gateway`。填写 `deploy/dev/.env`，除小程序
