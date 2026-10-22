@@ -12,30 +12,28 @@
 再执行 `git pull --ff-only origin dev`。不要将开发部署直接推送到正式分支。
 
 正式服务继续使用 `2026669.me → :8080 → :11008`。开发环境仅在
-`47.88.84.45` 上通过独立 Compose 项目 `pdfmath-dev` 运行，入口为
+`47.88.84.45` 上通过 `deploy` 脚本运行，入口为
 `dev.2026669.me → 开发服务器的 Caddy → 127.0.0.1:8080`。
 正式、开发网关虽然都使用 8080，但位于不同服务器，不会产生端口冲突。
-开发网关通过容器网络访问独立 Python 服务；宿主机 Python 调试端口为
-`127.0.0.1:11009`。内部端口不冲突，两个服务都只向宿主机回环地址发布。
+开发网关访问独立 Python 服务 `127.0.0.1:11009`。两个服务都只监听
+开发机回环地址；Caddy 负责对外提供 HTTPS。
 
 ## 首次部署
 
-### 当前开发机：复用 Python 环境，用 systemd 运行
+### 当前开发机：使用 deploy 脚本
 
-`47.88.84.45` 现有约 2GB 内存和较少空闲磁盘，已有
-`/root/miniconda3/envs/babledoc` Python 环境。此次部署选择 systemd，
-避免在该机器上重新构建完整镜像。实际代码目录为
-`/root/pdf/PDFMathTranslate-next`（它位于开发机，不是正式机的目录）。
+`47.88.84.45` 现有约 2GB 内存和 4GB swap，复用已有的
+`/root/miniconda3/envs/babledoc` Python 环境。代码目录为
+`/root/pdf/PDFMathTranslate-next`，当前分支为 `dev`。
 
-服务模板位于 `deploy/dev/pdfmath-dev-{api,gateway}.service`，绑定开发机
-回环地址 `8080` / `11009`，订单和翻译文件位于 `/var/lib/pdfmath-dev`。
-API 限制 1 个并发、1400MB 物理内存及 2GB swap（开发机已有 4GB swap），
-优先使用小 PDF 测试。PDF 工作进程即使处理一页也可能超出物理内存上限，
-需要使用 swap，速度会变慢；上述限制不代表大文件一定能运行成功。
+不使用 systemd 管理后端；脚本通过 `setsid nohup` 在后台启动进程。
+这不是进程守护器：进程异常退出或服务器重启后需要再次运行启动脚本。
+API 使用 1 个并发、QPS 1，优先用小 PDF 测试；没有 systemd 的内存和
+CPU 限额，PDF 工作进程仍可能占用较多内存或 swap。
 
-构建 Linux amd64 网关（可在开发电脑交叉编译），将二进制安装到开发机
-`/usr/local/lib/pdfmath-dev/go-gateway`。填写 `deploy/dev/.env`，除小程序
-身份、独立 JWT 和翻译引擎凭据外，还需设置：
+开发网关使用独立配置 `deploy/dev/.env`，不读取正式网关配置。
+首次配置可从 `deploy/dev/.env.example` 复制，填写 AppID、AppSecret、
+独立 JWT_SECRET 和翻译引擎凭据，并设置：
 
 ```dotenv
 GATEWAY_ADDR=127.0.0.1:8080
@@ -44,22 +42,37 @@ VIRTUALPAY_ENABLED=false
 VIRTUALPAY_DATA_DIR=/var/lib/pdfmath-dev/orders
 ```
 
-然后在开发机代码目录安装服务：
+配置文件权限设为 `600`。开发机已配置好该文件，不需要重新复制模板。
+服务器需有 Go 编译器（脚本会自动查找 `/usr/local/go/bin`）、Conda、
+`curl`、`ss`、`setsid` 和 `nohup`。
+
+在开发机代码目录执行：
 
 ```bash
-install -m 644 deploy/dev/pdfmath-dev-api.service /etc/systemd/system/
-install -m 644 deploy/dev/pdfmath-dev-gateway.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now pdfmath-dev-api pdfmath-dev-gateway
-systemctl status pdfmath-dev-api pdfmath-dev-gateway --no-pager
+# 只重启当前 dev 代码，不拉取
+bash deploy/restart-dev.sh
+
+# 拉取 origin/dev，编译网关并重启
+bash deploy/pull-dev.sh
+```
+
+两个入口都复用 `deploy/restart-all.sh`。更新入口只允许在干净的 `dev`
+工作区执行 `git pull --ff-only origin dev`；拉取失败或网关编译失败不会
+停止当前服务。重启前检查正在运行的翻译任务；有任务或无法确认任务状态
+时拒绝重启。需要明确放弃任务时才传 `-f`。
+
+日志文件：
+
+```bash
+tail -f deploy/dev/logs/pdf2zh-api.log deploy/dev/logs/go-gateway.log
 curl --fail http://127.0.0.1:11009/health
 curl --fail http://127.0.0.1:8080/health
 ```
 
-日常更新时同步代码和网关二进制，确认没有需要保留的开发任务，再重启
-`pdfmath-dev-api` / `pdfmath-dev-gateway`。日志用
-`journalctl -u pdfmath-dev-api -u pdfmath-dev-gateway` 查看。
-不要同时启动下述 Compose，它会占用同样的端口。
+API 监听 `11009`，网关监听 `8080`，订单和翻译临时文件位于
+`/var/lib/pdfmath-dev`。迁移时已停用原来的 `pdfmath-dev-api` 和
+`pdfmath-dev-gateway` systemd 服务，避免自动重启导致端口抢占。
+不要同时启动下面的可选 Compose 部署。
 
 ### 可选：Docker Compose
 
@@ -132,7 +145,7 @@ uploadFile、downloadFile 合法域名，保留 `https://2026669.me`。
 ## 支付边界
 
 当前代码的下单、查单、发货参数仍指向生产支付。开发域名不代表支付沙箱。
-开发 Compose 默认强制关闭虚拟支付，因此可以测试登录和引擎接口，也可
+开发配置关闭虚拟支付（Compose 默认也强制关闭），因此可以测试登录和引擎接口，也可
 通过 `/api/translate` 调试翻译；当前小程序订单、文件准备和支付流程不能
 在此状态下完整运行。`demoMode` 不是后端支付模拟器。
 
@@ -144,7 +157,7 @@ uploadFile、downloadFile 合法域名，保留 `https://2026669.me`。
 
 ## 日常更新
 
-当前 systemd 部署按上述 systemd 步骤更新。若选择 Compose 部署，在开发
+当前部署使用 `bash deploy/pull-dev.sh` 更新。若选择 Compose 部署，在开发
 目录更新代码后，继续使用明确指定文件的 Compose 命令：
 
 ```bash
@@ -153,8 +166,8 @@ docker compose -f deploy/docker-compose.dev.yml logs -f --tail 100
 ```
 
 重建可能打断开发翻译任务，先确认开发环境没有需要保留的运行中任务。
-不要在开发目录运行 `deploy/docker-deploy.sh`、`deploy/restart-all.sh`，
-也不要把本文件与正式 Compose 合并使用。停止开发环境：
+不要直接运行正式 Docker 更新脚本 `deploy/docker-deploy.sh`，也不要将开发
+和正式 Compose 合并使用。脚本部署请使用上述 dev 入口。停止可选 Compose：
 
 ```bash
 docker compose -f deploy/docker-compose.dev.yml down

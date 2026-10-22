@@ -1,6 +1,7 @@
 # Secrets and the 9 MB prebuilt binary must never reach the build daemon.
 .env
 go-gateway
+go-gateway.new
 data/
 *_test.go
 *.test.cjs

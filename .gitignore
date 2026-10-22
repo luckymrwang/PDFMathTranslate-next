@@ -178,3 +178,5 @@ CLAUDE.md
 
 # Gateway binary is rebuilt by deploy/start-gateway.sh on every start
 examples/go-gateway/go-gateway
+examples/go-gateway/go-gateway.new
+deploy/dev/logs/

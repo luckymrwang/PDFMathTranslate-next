@@ -8,7 +8,10 @@ set -u
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-$(cd "$DIR/.." && pwd)}"
-GW_DIR="$DIR/../examples/go-gateway"
+GW_DIR="${GW_DIR:-$DIR/../examples/go-gateway}"
+export GW_DIR
+GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-$GW_DIR/.env}"
+export GATEWAY_ENV_FILE
 API_PORT="${PDF2ZH_API_PORT:-11008}"
 LOG_DIR="${LOG_DIR:-/root}"
 API_LOG="$LOG_DIR/pdf2zh-api.log"
@@ -20,7 +23,7 @@ FORCE=0
 # The gateway port comes from GATEWAY_ADDR in its .env (default :8080).
 GATEWAY_PORT="${GATEWAY_PORT:-}"
 if [ -z "$GATEWAY_PORT" ]; then
-    addr=$(sed -n 's/^GATEWAY_ADDR=//p' "$GW_DIR/.env" 2>/dev/null | tail -n 1 | tr -d "'\"")
+    addr=$(sed -n 's/^GATEWAY_ADDR=//p' "$GATEWAY_ENV_FILE" 2>/dev/null | tail -n 1 | tr -d "'\"")
     GATEWAY_PORT="${addr##*:}"
     GATEWAY_PORT="${GATEWAY_PORT:-8080}"
 fi
@@ -59,8 +62,9 @@ start_detached() {
 wait_listen() {
     local name=$1 port=$2 timeout=$3 log=$4 i
     for i in $(seq 1 "$timeout"); do
-        if [ -n "$(pids_on "$port")" ]; then
-            echo "$name: listening on :$port after ${i}s"
+        if [ -n "$(pids_on "$port")" ] && \
+           curl --fail --silent --max-time 2 "http://127.0.0.1:$port/health" >/dev/null; then
+            echo "$name: healthy on :$port after ${i}s"
             return 0
         fi
         sleep 1
@@ -79,7 +83,20 @@ pull_latest() {
     local before after
     before=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null)
     echo "git: pulling in $REPO_DIR"
-    if ! git -C "$REPO_DIR" pull --ff-only; then
+    local branch="${PULL_BRANCH:-}"
+    if [ -n "$branch" ]; then
+        if [ "$(git -C "$REPO_DIR" branch --show-current)" != "$branch" ]; then
+            echo "git: expected branch $branch; nothing was stopped"
+            return 1
+        fi
+        if [ -n "$(git -C "$REPO_DIR" status --porcelain)" ]; then
+            echo "git: checkout has local changes; nothing was stopped"
+            return 1
+        fi
+    fi
+    local pull_args=(--ff-only)
+    [ -n "$branch" ] && pull_args+=(origin "$branch")
+    if ! git -C "$REPO_DIR" pull "${pull_args[@]}"; then
         echo "git: pull failed; nothing was stopped. Fix the repo (git status) or re-run with SKIP_PULL=1."
         return 1
     fi
@@ -92,8 +109,15 @@ pull_latest() {
 }
 
 main() {
-    active=$(curl -s -m 3 "http://127.0.0.1:$API_PORT/health" 2>/dev/null \
-        | sed -n 's/.*"active_tasks": *\([0-9][0-9]*\).*/\1/p')
+    local active=0
+    if [ -n "$(pids_on "$API_PORT")" ]; then
+        active=$(curl --fail -s -m 3 "http://127.0.0.1:$API_PORT/health" 2>/dev/null \
+            | sed -n 's/.*"active_tasks": *\([0-9][0-9]*\).*/\1/p')
+        if ! [[ "$active" =~ ^[0-9]+$ ]] && [ "$FORCE" != 1 ]; then
+            echo "api: cannot verify running tasks; nothing was stopped. Use -f only if interruption is acceptable."
+            return 1
+        fi
+    fi
     if [ "${active:-0}" -gt 0 ] && [ "$FORCE" != 1 ]; then
         echo "$active translation(s) are running; restarting would lose them. Re-run with -f to force."
         return 1
@@ -101,6 +125,11 @@ main() {
 
     # Pull before touching the running services, so a failed pull leaves them up.
     pull_latest || return 1
+
+    # Verify/build before stopping either service. Missing Go or an invalid
+    # build must not leave the existing deployment down.
+    sh "$DIR/start-gateway.sh" --build-only || return 1
+    export GATEWAY_SKIP_BUILD=1
 
     # Gateway first (it depends on the API), then the API.
     stop_port "gateway" "$GATEWAY_PORT" || { echo "gateway: could not stop"; return 1; }
