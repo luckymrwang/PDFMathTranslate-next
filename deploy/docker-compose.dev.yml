@@ -49,6 +49,7 @@ services:
       PDF2ZH_API_URL: http://pdf2zh:11008
       GATEWAY_ADDR: ":8080"
       VIRTUALPAY_DATA_DIR: /data
+      TRIAL_ENABLED: "true"
       # Existing payment implementation uses production payment parameters.
       # Opt in explicitly ONLY when intentionally testing real payments.
       VIRTUALPAY_ENABLED: ${DEV_VIRTUALPAY_ENABLED:-false}

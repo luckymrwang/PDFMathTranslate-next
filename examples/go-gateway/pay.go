@@ -30,16 +30,22 @@ type PayService struct {
 
 func (s *Server) payEnabled() bool { return s.pay != nil && s.pay.cfg.Enabled }
 
+// Trial-only deployments keep paid order creation and payment callbacks disabled.
+func (s *Server) ordersEnabled() bool {
+	return s.pay != nil && (s.pay.cfg.Enabled || s.pay.cfg.TrialEnabled)
+}
+
 func orderView(order PayOrder) map[string]any {
 	return map[string]any{"id": order.ID, "state": order.State, "quantity": order.Quantity,
 		"pages":          order.PageCount(),
+		"document_pages": order.DocumentPages,
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial}
 }
 
 // trialPages is how many leading pages a free trial translates.
-const trialPages = 1
+const trialPages = 3
 
 // trialEngine is the free engine used for trials; it is always configured.
 const trialEngine = "Bing"
@@ -55,7 +61,7 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method not allowed")
 		return
 	}
-	if !s.payEnabled() {
+	if !s.ordersEnabled() {
 		writeJSON(w, 200, map[string]any{"enabled": false})
 		return
 	}
@@ -64,7 +70,7 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 		enginePrices[engine] = p.Price
 	}
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
-	writeJSON(w, 200, map[string]any{"enabled": true, "standard_price_fen": s.pay.cfg.StandardPrice,
+	writeJSON(w, 200, map[string]any{"enabled": s.payEnabled(), "trial_enabled": true, "standard_price_fen": s.pay.cfg.StandardPrice,
 		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices,
 		"ios_unit_fen": s.pay.cfg.IOSUnit, "ios_min_fen": iosMinFen,
 		"trial_available": !s.pay.store.hasTrial(openid), "trial_pages": trialPages, "trial_engine": trialEngine})
@@ -269,7 +275,7 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
-	if !s.payEnabled() {
+	if !s.ordersEnabled() {
 		writeError(w, 503, "虚拟支付尚未配置")
 		return
 	}
@@ -301,6 +307,10 @@ func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
 	order, ok := s.pay.store.get(id)
 	if !ok || order.OpenID != openid {
 		writeError(w, 404, "订单不存在")
+		return
+	}
+	if !order.Trial && !s.payEnabled() {
+		writeError(w, 503, "付费翻译暂未开放")
 		return
 	}
 	if cancelling && r.Method == http.MethodPost {
@@ -343,7 +353,7 @@ func (s *Server) handlePayQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method not allowed")
 		return
 	}
-	if !s.payEnabled() {
+	if !s.ordersEnabled() {
 		writeError(w, 503, "虚拟支付尚未配置")
 		return
 	}
@@ -358,6 +368,10 @@ func (s *Server) handlePayQuery(w http.ResponseWriter, r *http.Request) {
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
 	if !ok || order.OpenID != openid {
 		writeError(w, 404, "订单不存在")
+		return
+	}
+	if !order.Trial && !s.payEnabled() {
+		writeError(w, 503, "付费翻译暂未开放")
 		return
 	}
 	if order.State == "pending" && time.Now().Unix()-order.LastQuery >= 10 {
@@ -559,7 +573,12 @@ func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, e
 	params := map[string]any{"lang_in": order.LangIn, "lang_out": order.LangOut, "qps": 4,
 		"skip_image_translation": true, "translate_engine_settings": settings}
 	if order.Trial {
-		params["pages"] = "1-" + strconv.Itoa(trialPages)
+		pages := order.PageCount()
+		if pages < 1 || pages > trialPages {
+			pages = trialPages
+		}
+		params["pages"] = "1-" + strconv.Itoa(pages)
+		params["only_include_translated_page"] = true
 	}
 	body, err := s.uploadFile(ctx, "/v1/translate", order.FilePath, order.Name, params, key)
 	if err != nil {
@@ -596,6 +615,9 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 		queryWeChat := round%5 == 0
 		round++
 		for _, order := range s.pay.store.all() {
+			if !order.Trial && !s.payEnabled() {
+				continue
+			}
 			if ctx.Err() != nil {
 				return
 			}

@@ -94,7 +94,7 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method not allowed")
 		return
 	}
-	if !s.payEnabled() {
+	if !s.ordersEnabled() {
 		writeError(w, 503, "虚拟支付尚未配置")
 		return
 	}
@@ -272,13 +272,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method not allowed")
 		return
 	}
-	if !s.payEnabled() {
+	if !s.ordersEnabled() {
 		writeError(w, 503, "虚拟支付尚未配置")
-		return
-	}
-	session := s.pay.sessions.get(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if session == "" {
-		writeError(w, 401, "请重新登录后支付")
 		return
 	}
 	owner, _ := r.Context().Value(ctxKeyOpenID).(string)
@@ -293,6 +288,18 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil {
 		writeError(w, 400, "invalid settings")
 		return
+	}
+	var session string
+	if !input.Trial {
+		if !s.payEnabled() {
+			writeError(w, 503, "付费翻译暂未开放")
+			return
+		}
+		session = s.pay.sessions.get(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		if session == "" {
+			writeError(w, 401, "请重新登录后支付")
+			return
+		}
 	}
 	if input.Trial {
 		// The engine is fixed server-side so a trial can never use a paid engine.
@@ -340,7 +347,11 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "无法创建订单")
 			return
 		}
-		order := PayOrder{ID: id, OpenID: owner, Pages: trialPages, Engine: input.Engine,
+		pages := trialPages
+		if file.Pages < pages {
+			pages = file.Pages
+		}
+		order := PayOrder{ID: id, OpenID: owner, Pages: pages, DocumentPages: file.Pages, Engine: input.Engine,
 			LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 			Name: file.Name, State: "paid", Provided: true, Trial: true, CreatedAt: time.Now().Unix(), Attach: id}
 		if err := s.pay.store.addTrial(order); err != nil {

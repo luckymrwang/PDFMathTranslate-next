@@ -76,7 +76,7 @@ func (s *Server) handleTranslateSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
-	if s.payEnabled() {
+	if s.ordersEnabled() {
 		writeError(w, http.StatusPaymentRequired, "请通过已支付订单启动翻译")
 		return
 	}

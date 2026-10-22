@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,7 @@ import (
 	"time"
 )
 
-func TestFreeTrialIsOncePerUserAndTranslatesFirstPage(t *testing.T) {
+func TestFreeTrialIsOncePerUserAndTranslatesFirstThreePages(t *testing.T) {
 	s := testPayServer(t)
 	var forwarded map[string]any
 	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +71,7 @@ func TestFreeTrialIsOncePerUserAndTranslatesFirstPage(t *testing.T) {
 	}
 	json.Unmarshal(got.Body.Bytes(), &created)
 	if created.Order["state"] != "paid" || created.Order["trial"] != true ||
-		created.Order["engine"] != trialEngine || created.Order["total_fen"].(float64) != 0 || created.PayData != nil {
+		created.Order["engine"] != trialEngine || created.Order["total_fen"].(float64) != 0 || created.PayData != nil || created.Order["pages"].(float64) != 3 || created.Order["document_pages"].(float64) != 30 {
 		t.Fatal("unexpected trial order", got.Body.String())
 	}
 	if again := trial("owner"); again.Code != 409 {
@@ -84,10 +85,122 @@ func TestFreeTrialIsOncePerUserAndTranslatesFirstPage(t *testing.T) {
 	if _, err := s.startPaidOrder(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
-	if forwarded["pages"] != "1-1" {
-		t.Fatal("trial must translate only the first page:", forwarded)
+	if forwarded["pages"] != "1-3" {
+		t.Fatal("trial must translate only the first three pages:", forwarded)
 	}
 	if err := s.reconcileOrder(context.Background(), id); err != nil {
 		t.Fatal("trial must not query WeChat:", err)
+	}
+}
+
+func TestTrialOnlyModeCannotCreatePaidOrdersOrTranslateWholeDocument(t *testing.T) {
+	s := testPayServer(t)
+	s.pay.cfg.Enabled = false
+	s.pay.cfg.TrialEnabled = true
+	var forwarded map[string]any
+	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/engine/check":
+			writeJSON(w, 200, map[string]bool{"ready": true})
+		case "/v1/translate":
+			r.ParseMultipartForm(1 << 20)
+			json.Unmarshal([]byte(r.FormValue("data")), &forwarded)
+			writeJSON(w, 200, map[string]string{"id": "trial-only-task"})
+		default:
+			t.Errorf("unexpected upstream %s", r.URL.Path)
+		}
+	}))
+	defer python.Close()
+	s.pdf2zh = NewPdf2zhClient(python.URL)
+	config := httptest.NewRecorder()
+	s.handlePayConfig(config, ownRequest("GET", "/pay/config", "owner", nil))
+	var cfg map[string]any
+	json.Unmarshal(config.Body.Bytes(), &cfg)
+	if cfg["enabled"] != false || cfg["trial_enabled"] != true || cfg["trial_pages"] != float64(3) {
+		t.Fatal(config.Body.String())
+	}
+	for _, pages := range []int{1, 2, 3, 9} {
+		t.Run(fmt.Sprint(pages), func(t *testing.T) {
+			owner := fmt.Sprintf("owner-%d", pages)
+			path := t.TempDir() + "/source.pdf"
+			content := []byte("%PDF-test")
+			os.WriteFile(path, content, 0600)
+			hash := sha256.Sum256(content)
+			s.prepared.Lock()
+			if s.prepared.files == nil {
+				s.prepared.files = make(map[string]preparedPDF)
+			}
+			s.prepared.files[owner] = preparedPDF{Owner: owner, Path: path, Name: "source.pdf", Hash: hex.EncodeToString(hash[:]), Pages: pages, Expires: time.Now().Add(time.Hour)}
+			s.prepared.Unlock()
+			payload, _ := json.Marshal(map[string]any{"file_token": owner, "trial": true, "engine": "GPT-6", "pages": "1-999", "lang_in": "en", "lang_out": "zh"})
+			w := httptest.NewRecorder()
+			// A normal authenticated user needs no payment-session signature for a trial.
+			s.handlePreparedOrder(w, ownRequest("POST", "/pay/order/prepared", owner, bytes.NewReader(payload)))
+			if w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			var created struct{ Order PayOrder }
+			var body struct {
+				Order map[string]any `json:"order"`
+			}
+			json.Unmarshal(w.Body.Bytes(), &body)
+			id := body.Order["id"].(string)
+			created.Order, _ = s.pay.store.get(id)
+			limit := pages
+			if limit > 3 {
+				limit = 3
+			}
+			if created.Order.Pages != limit || created.Order.DocumentPages != pages || created.Order.Engine != "Bing" {
+				t.Fatal(created.Order)
+			}
+			if _, err := s.startPaidOrder(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+			if forwarded["pages"] != fmt.Sprintf("1-%d", limit) || forwarded["only_include_translated_page"] != true {
+				t.Fatal("page limit bypass", forwarded)
+			}
+		})
+	}
+	for _, prepared := range []bool{false, true} {
+		w := httptest.NewRecorder()
+		r := ownRequest("POST", "/pay/order", "owner", bytes.NewBufferString(`{"trial":false}`))
+		if prepared {
+			s.handlePreparedOrder(w, r)
+		} else {
+			s.handlePayOrder(w, r)
+		}
+		if w.Code != 503 {
+			t.Fatal("paid creation must stay disabled", w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	s.handleTranslateSubmit(w, ownRequest("POST", "/api/translate", "owner", nil))
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatal("direct whole-document bypass", w.Code)
+	}
+}
+
+func TestTrialUpgradePreservesFullSourcePageCount(t *testing.T) {
+	s := testPayServer(t)
+	raw := []byte("%PDF-original")
+	path := t.TempDir() + "/source.pdf"
+	os.WriteFile(path, raw, 0600)
+	hash := sha256.Sum256(raw)
+	// Upgrading must work before the periodic archiver has persisted results.
+	order := PayOrder{ID: "trial-upgrade", OpenID: "owner", State: "submitted", Trial: true, Pages: 3, DocumentPages: 12, FilePath: path, FileHash: hex.EncodeToString(hash[:]), Name: "source.pdf"}
+	if err := s.pay.store.add(order); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleRepreparePDF(w, ownRequest("POST", "/pay/prepare/order", "owner", bytes.NewBufferString(`{"order_id":"trial-upgrade"}`)))
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var prepared struct {
+		Pages int `json:"page_count"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &prepared)
+	if prepared.Pages != 12 {
+		t.Fatal("full quote must not charge for just trial pages", prepared)
 	}
 }

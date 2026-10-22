@@ -93,6 +93,7 @@ class TranslateRequest(BaseModel):
     lang_out: str = Field(default="zh")
     qps: int = Field(default=DEFAULT_QPS)
     pages: str | None = Field(default=None)
+    only_include_translated_page: bool = Field(default=False)
     no_mono: bool = Field(default=DEFAULT_NO_MONO)
     no_dual: bool = Field(default=False)
     max_pages_per_part: int | None = Field(default=DEFAULT_MAX_PAGES_PER_PART)
@@ -181,6 +182,7 @@ def _build_settings(req: TranslateRequest, output_dir: Path) -> SettingsModel:
     settings.translation.pool_max_workers = req.pool_max_workers
     settings.translation.output = str(output_dir)
     settings.pdf.pages = req.pages
+    settings.pdf.only_include_translated_page = req.only_include_translated_page
     settings.pdf.max_pages_per_part = req.max_pages_per_part
     settings.pdf.no_mono = req.no_mono
     settings.pdf.no_dual = req.no_dual

@@ -15,6 +15,7 @@ import (
 
 type PayConfig struct {
 	Enabled                                   bool
+	TrialEnabled                              bool
 	OfferID, AppKey, NotifyToken, AESKey, Dir string
 	StandardProduct, EnhancedProduct          string
 	StandardPrice, EnhancedPrice              int
@@ -39,7 +40,8 @@ var engineProductEnv = map[string]string{"Google": "GOOGLE", "GPT-6": "GPT"}
 
 func loadPayConfig() (*PayConfig, error) {
 	c := &PayConfig{Enabled: os.Getenv("VIRTUALPAY_ENABLED") == "true",
-		OfferID: os.Getenv("VIRTUALPAY_OFFER_ID"), AppKey: os.Getenv("VIRTUALPAY_APP_KEY"),
+		TrialEnabled: os.Getenv("TRIAL_ENABLED") == "true",
+		OfferID:      os.Getenv("VIRTUALPAY_OFFER_ID"), AppKey: os.Getenv("VIRTUALPAY_APP_KEY"),
 		NotifyToken: os.Getenv("VIRTUALPAY_NOTIFY_TOKEN"), AESKey: os.Getenv("VIRTUALPAY_ENCODING_AES_KEY"),
 		Dir:             getenv("VIRTUALPAY_DATA_DIR", "./data/virtualpay"),
 		StandardProduct: os.Getenv("VIRTUALPAY_STANDARD_PRODUCT_ID"),
@@ -118,7 +120,9 @@ type PayOrder struct {
 	Engine, LangIn, LangOut, FilePath, FileHash, Name, Attach, SignData string
 	State, WxOrderID, TaskID                                            string
 	Provided                                                            bool
-	// Trial orders are free, never touch WeChat payment, and translate only page 1.
+	// DocumentPages preserves the full source length for a trial-to-paid upgrade.
+	DocumentPages int
+	// Trial orders are free and never touch WeChat payment.
 	Trial                bool
 	CreatedAt, LastQuery int64
 	// Delivery is "" while translating, "archived" once results are durable, "failed" when retries are exhausted.

@@ -39,6 +39,7 @@ CPU 限额，PDF 工作进程仍可能占用较多内存或 swap。
 GATEWAY_ADDR=127.0.0.1:8080
 PDF2ZH_API_URL=http://127.0.0.1:11009
 VIRTUALPAY_ENABLED=false
+TRIAL_ENABLED=true
 VIRTUALPAY_DATA_DIR=/var/lib/pdfmath-dev/orders
 ```
 
@@ -145,9 +146,14 @@ uploadFile、downloadFile 合法域名，保留 `https://2026669.me`。
 ## 支付边界
 
 当前代码的下单、查单、发货参数仍指向生产支付。开发域名不代表支付沙箱。
-开发配置关闭虚拟支付（Compose 默认也强制关闭），因此可以测试登录和引擎接口，也可
-通过 `/api/translate` 调试翻译；当前小程序订单、文件准备和支付流程不能
-在此状态下完整运行。`demoMode` 不是后端支付模拟器。
+开发环境保留 `VIRTUALPAY_ENABLED=false`，并设置 `TRIAL_ENABLED=true`，
+可独立测试免费试译：上传 PDF → 创建一次试译权益 → 前 3 页标准翻译 →
+打开和下载结果。不需要支付 AppKey 或支付会话签名。短文档按实际页数
+处理，原文总页数单独保存，用于之后的全文报价。
+
+试译模式会封锁直接调用 `/api/translate` 的免费全文入口，付费下单和支付
+通知仍关闭。首次试译后不能再次领取；完整的付费流程需在配置好真实支付
+的环境验证。旧的一页试译订单继续按原来的页数恢复，不会自动增加权益。
 
 需要专门测试真实支付时，先准备独立订单存储、正确的商品及支付配置和
 通知路由方案，再显式设置 `DEV_VIRTUALPAY_ENABLED=true` 启动开发 Compose。

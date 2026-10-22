@@ -189,6 +189,11 @@ wx.uploadFile({
 
 ### 与小程序联调
 
+首页直接提供一次免费标准试译，最多翻译前 3 页；不足 3 页按实际页数处理。
+试译结果页可准备原文全文报价，原文总页数独立保存在订单中。仅试译环境可
+设置 `TRIAL_ENABLED=true`、`VIRTUALPAY_ENABLED=false`，此时免费试译无需
+支付密钥，但付费下单和直接免费全文翻译均被拒绝。试译不代表支付成功。
+
 1. 在本项目启动 Python 服务：`PDF2ZH_API_HOST=127.0.0.1 pdf2zh --api`（默认端口 `11008`）；不要把未鉴权的 Python API 直接暴露到公网。
 2. 设置 `WECHAT_APPSECRET` 和至少 16 字节的 `JWT_SECRET` 后运行 `go run .`。
 3. 小程序目录 `/Users/sino/Documents/www/bucket/wxapp/pdftranslate` 的 `config.js` 按版本选择地址：开发版、体验版使用 `https://dev.2026669.me`，正式版使用 `https://2026669.me`。独立开发环境部署见 [开发环境操作说明](../../deploy/DEVELOPMENT.md)。如需本机联调，可临时修改 develop 对应地址为 `http://127.0.0.1:8080`，并在开发者工具关闭合法域名校验。

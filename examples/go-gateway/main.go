@@ -38,7 +38,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("payment config error: %v", err)
 	}
-	if payConfig.Enabled {
+	if payConfig.Enabled || payConfig.TrialEnabled {
 		store, err := openOrderStore(payConfig.Dir)
 		if err != nil {
 			log.Fatalf("payment storage error: %v", err)
@@ -57,7 +57,7 @@ func main() {
 			}
 		}
 		go srv.runPayReconciliation(context.Background())
-		log.Printf("virtual payment enabled (production environment, durable order store)")
+		log.Printf("order service enabled (payment=%t, free_trial=%t, durable order store)", payConfig.Enabled, true)
 	}
 	if s3cfg, ok := LoadS3Config(); ok {
 		srv.storage = NewS3Client(s3cfg)

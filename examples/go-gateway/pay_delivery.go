@@ -349,7 +349,7 @@ func (s *Server) saveResult(ctx context.Context, taskID, kind, dest string) (str
 }
 
 func (s *Server) paidOrderForTask(taskID string) (PayOrder, bool) {
-	if !s.payEnabled() {
+	if !s.ordersEnabled() {
 		return PayOrder{}, false
 	}
 	for _, order := range s.pay.store.all() {

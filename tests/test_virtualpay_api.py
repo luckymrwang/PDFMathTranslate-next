@@ -11,6 +11,16 @@ from pdf2zh_next import http_api as api
 
 
 class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
+    def test_trial_settings_include_only_requested_pages(self):
+        request = api.TranslateRequest(
+            pages="1-3", only_include_translated_page=True,
+            translate_engine_settings={"translate_engine_type": "Bing"},
+        )
+        settings = api._build_settings(request, Path("/tmp/trial-test"))
+        self.assertEqual(settings.pdf.pages, "1-3")
+        self.assertTrue(settings.pdf.only_include_translated_page)
+        self.assertFalse(api.TranslateRequest().only_include_translated_page)
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.original_dir = api.WORK_DIR
