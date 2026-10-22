@@ -1,0 +1,62 @@
+# Development host: 47.88.84.45 (dev.2026669.me).
+# Production stays on 103.85.226.245. Run this stack on the development host only.
+# Never merge this file with docker-compose.yml.
+# docker compose -f deploy/docker-compose.dev.yml up -d --build
+name: pdfmath-dev
+
+services:
+  pdf2zh:
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+      args:
+        CACHEBUST: ${CACHEBUST:-1}
+    image: pdfmath-dev/pdf2zh:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11009:11008"
+    cpus: 1.0
+    mem_limit: 2g
+    environment:
+      PDF2ZH_API_HOST: "0.0.0.0"
+      PDF2ZH_API_PORT: "11008"
+      PDF2ZH_MAX_CONCURRENT: "1"
+      PDF2ZH_QPS: "1"
+      PDF2ZH_POOL_MAX_WORKERS: "1"
+      PDF2ZH_NO_MONO: "true"
+      PDF2ZH_MAX_PAGES_PER_PART: "10"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:11008/health',timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  gateway:
+    platform: linux/amd64
+    build:
+      context: ../examples/go-gateway
+    image: pdfmath-dev/go-gateway:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    cpus: 0.5
+    mem_limit: 256m
+    env_file:
+      - ./dev/.env
+    environment:
+      PDF2ZH_API_URL: http://pdf2zh:11008
+      GATEWAY_ADDR: ":8080"
+      VIRTUALPAY_DATA_DIR: /data
+      # Existing payment implementation uses production payment parameters.
+      # Opt in explicitly ONLY when intentionally testing real payments.
+      VIRTUALPAY_ENABLED: ${DEV_VIRTUALPAY_ENABLED:-false}
+    volumes:
+      - dev-orders:/data
+    depends_on:
+      pdf2zh:
+        condition: service_healthy
+
+volumes:
+  dev-orders:

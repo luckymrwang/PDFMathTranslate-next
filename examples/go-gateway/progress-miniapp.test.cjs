@@ -10,7 +10,11 @@ function harness(getStatus) {
   let page, timer, starts = 0
   const api = { getStatus, startPayTranslation: async () => { starts++; return { id: 'task' } } }
   vm.runInNewContext(fs.readFileSync(path.join(root, 'pages/progress/progress.js'), 'utf8'), {
-    require: name => name.includes('api') ? api : { defaultTranslate: {} },
+    require: name => {
+      if (name.includes('api')) return api
+      if (name.includes('storage-key')) return { storageKey: key => key }
+      return { defaultTranslate: {} }
+    },
     Page: value => { page = value },
     setTimeout: (fn, delay) => { timer = { fn, delay }; return 1 },
     clearTimeout: () => { timer = null }, clearInterval() {},

@@ -10,6 +10,7 @@ const payment = require(path.join(root, 'utils/payment.js'))
 async function run() {
   let captured
   global.wx = {
+    getAccountInfoSync: () => ({ miniProgram: { envVersion: 'release' } }),
     canIUse: () => true,
     getAppBaseInfo: () => ({ version: '8.0.68' }),
     getDeviceInfo: () => ({ platform: 'ios' }),
@@ -38,6 +39,7 @@ async function run() {
   const sandbox = {
     require: name => {
       if (name === '../../config') return { demoMode: false }
+      if (name === '../../utils/storage-key') return require(path.join(root, 'utils/storage-key.js'))
       if (name === '../../utils/api') return api
       if (name === '../../utils/payment') return { ...payment, assertPaymentSupported() {}, pay: async () => ({}) }
       if (name === '../../utils/order-status') return require(path.join(root, 'utils/order-status.js'))

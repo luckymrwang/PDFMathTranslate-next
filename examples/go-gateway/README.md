@@ -191,8 +191,8 @@ wx.uploadFile({
 
 1. 在本项目启动 Python 服务：`PDF2ZH_API_HOST=127.0.0.1 pdf2zh --api`（默认端口 `11008`）；不要把未鉴权的 Python API 直接暴露到公网。
 2. 设置 `WECHAT_APPSECRET` 和至少 16 字节的 `JWT_SECRET` 后运行 `go run .`。
-3. 小程序目录 `/Users/sino/Documents/www/bucket/wxapp/pdftranslate` 的 `config.js` 已默认指向本机 `http://127.0.0.1:8080`，供微信开发者工具联调；开发工具须临时关闭合法域名校验。
-4. 真机及正式发布时，将小程序 `baseUrl` 改为可访问的 HTTPS 网关域名；在微信公众平台配置该域名为 request、uploadFile、downloadFile 合法域名。若启用 OSS，OSS 下载域名也须列入 downloadFile 合法域名。`127.0.0.1` 在手机上指手机自身，不能用于真机。
+3. 小程序目录 `/Users/sino/Documents/www/bucket/wxapp/pdftranslate` 的 `config.js` 按版本选择地址：开发版、体验版使用 `https://dev.2026669.me`，正式版使用 `https://2026669.me`。独立开发环境部署见 [开发环境操作说明](../../deploy/DEVELOPMENT.md)。如需本机联调，可临时修改 develop 对应地址为 `http://127.0.0.1:8080`，并在开发者工具关闭合法域名校验。
+4. 在微信公众平台将正式和开发域名都配置为 request、uploadFile、downloadFile 合法域名。若启用对象存储直连下载，存储下载域名也须列入 downloadFile 合法域名；代理下载只需网关域名。`127.0.0.1` 在手机上指手机自身，不能用于真机。
 
 真实模式确认弹层由服务器读取 PDF 实际页数并返回订单金额，再调用 `wx.requestVirtualPayment`。只有服务端确认已支付才能开始翻译。演示模式仍为本地估算，不扣费。
 

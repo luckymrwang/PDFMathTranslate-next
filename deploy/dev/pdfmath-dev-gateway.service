@@ -1,0 +1,21 @@
+[Unit]
+Description=PDFMath development Go gateway
+After=network-online.target pdfmath-dev-api.service
+Wants=network-online.target pdfmath-dev-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/pdf/PDFMathTranslate-next
+EnvironmentFile=/root/pdf/PDFMathTranslate-next/deploy/dev/.env
+ExecStart=/usr/local/lib/pdfmath-dev/go-gateway
+Restart=on-failure
+RestartSec=5
+StateDirectory=pdfmath-dev
+StateDirectoryMode=0700
+CPUQuota=25%
+MemoryMax=128M
+MemorySwapMax=128M
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
