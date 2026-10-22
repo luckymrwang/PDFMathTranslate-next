@@ -163,6 +163,12 @@ func (s *Server) failPaidOrder(id, reason string) error {
 }
 
 func paidFailureMessage(order PayOrder) string {
+	if order.Trial {
+		if order.FailReason == alreadyTranslated {
+			return msgAlreadyTranslated
+		}
+		return "免费试译失败，请联系客服处理"
+	}
 	if order.FailReason == alreadyTranslated {
 		return msgAlreadyTranslated + "；本单请联系客服退款"
 	}

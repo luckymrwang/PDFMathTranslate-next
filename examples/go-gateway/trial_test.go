@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -202,5 +203,13 @@ func TestTrialUpgradePreservesFullSourcePageCount(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &prepared)
 	if prepared.Pages != 12 {
 		t.Fatal("full quote must not charge for just trial pages", prepared)
+	}
+}
+
+func TestTrialFailureDoesNotMentionPaymentOrRefund(t *testing.T) {
+	for _, reason := range []string{"", alreadyTranslated} {
+		if message := paidFailureMessage(PayOrder{Trial: true, FailReason: reason}); strings.Contains(message, "退款") {
+			t.Fatal(message)
+		}
 	}
 }
