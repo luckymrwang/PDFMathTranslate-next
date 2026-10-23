@@ -79,6 +79,10 @@ async function run() {
   await home.loadOrders()
   assert.equal(home.data.pendingUpgrade.orderID, 'trial-1')
   assert.equal(home.data.recentShort[0].canUpgrade, true)
+  assert.equal(home.canUpgrade({ ...trialJob, createdAt: Date.now() - 73 * 3600 * 1000 }), false, 'Trials expire with their server file')
+  home.dismissPendingUpgrade()
+  assert.equal(home.data.pendingUpgrade, null, 'The banner can be dismissed')
+  assert.equal(home.markUpgradable([trialJob])[0].canUpgrade, true, 'Dismissing keeps the recent-list upgrade')
   orders = [{ id: 'paid-0', upgrade_from: 'trial-1', state: 'submitted' }]
   await home.loadOrders()
   assert.equal(home.data.pendingUpgrade, null, 'Upgraded trials leave the banner')
