@@ -14,7 +14,7 @@ import (
 // An inviter earns referralRewardPages free standard-translation pages for each
 // invited new user whose free trial is delivered, for at most referralCap friends.
 const (
-	referralRewardPages = 8
+	referralRewardPages = 3
 	referralCap         = 10
 )
 
