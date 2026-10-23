@@ -89,7 +89,7 @@ func (c *PayConfig) productFor(engine string) (string, int) {
 	if p, ok := c.EngineProducts[engine]; ok {
 		return p.Product, p.Price
 	}
-	if engine == "Google" || engine == "Bing" {
+	if standardEngine(engine) {
 		return c.StandardProduct, c.StandardPrice
 	}
 	return c.EnhancedProduct, c.EnhancedPrice
@@ -126,6 +126,11 @@ type PayOrder struct {
 	// is how many pages were left out of Quantity. Pages still covers the whole document.
 	UpgradeFrom string
 	TrialCredit int
+	// ReferredBy is the inviter of a trial's new user. CreditPages are referral pages
+	// spent on this order, given back once (CreditReturned) if it closes unpaid or is refunded.
+	ReferredBy     string
+	CreditPages    int
+	CreditReturned bool
 	// Trial orders are free and never touch WeChat payment.
 	Trial                bool
 	CreatedAt, LastQuery int64
@@ -261,6 +266,21 @@ func (s *OrderStore) addTrial(order PayOrder) error {
 }
 
 var errTrialUsed = errors.New("trial already used")
+
+// standardEngine reports the machine-translation engines; referral pages only cover these.
+func standardEngine(engine string) bool { return engine == "Google" || engine == "Bing" }
+
+// hasOrders reports whether the user has ever created an order; only new users can be invited.
+func (s *OrderStore) hasOrders(owner string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, order := range s.orders {
+		if order.OpenID == owner {
+			return true
+		}
+	}
+	return false
+}
 
 // trialCredit returns how many already-translated trial pages an upgrade of the same
 // file may leave unpaid. Each trial is credited once: a paid or delivered upgrade uses it up.

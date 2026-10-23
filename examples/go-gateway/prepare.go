@@ -286,6 +286,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		Trial     bool   `json:"trial"`
 		// UpgradeFrom names the trial order of this file whose pages are not charged again.
 		UpgradeFrom string `json:"upgrade_from"`
+		// Ref is the invite code a new user arrived with; it only counts on their trial.
+		Ref string `json:"ref"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil {
 		writeError(w, 400, "invalid settings")
@@ -356,6 +358,9 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		order := PayOrder{ID: id, OpenID: owner, Pages: pages, DocumentPages: file.Pages, Engine: input.Engine,
 			LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 			Name: file.Name, State: "paid", Provided: true, Trial: true, CreatedAt: time.Now().Unix(), Attach: id}
+		if input.Ref != "" && !s.pay.store.hasOrders(owner) {
+			order.ReferredBy = s.pay.referrals.inviter(input.Ref, owner)
+		}
 		if err := s.pay.store.addTrial(order); err != nil {
 			if errors.Is(err, errTrialUsed) {
 				writeError(w, 409, "免费试用已使用过")
@@ -381,6 +386,40 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		}
 		billed -= credit
 	}
+	// Referral pages cover standard translation only and are held by the order until it settles.
+	referralPages := 0
+	if standardEngine(input.Engine) {
+		if referralPages, err = s.pay.referrals.reserve(owner, billed); err != nil {
+			writeError(w, 500, "订单保存失败")
+			return
+		}
+		billed -= referralPages
+	}
+	defer func() {
+		if referralPages > 0 && !saved {
+			_ = s.pay.referrals.restore(owner, referralPages)
+		}
+	}()
+	if billed == 0 {
+		// Fully covered by referral pages: a paid order that never touches WeChat payment.
+		id, err := newTradeNo()
+		if err != nil {
+			writeError(w, 500, "无法创建订单")
+			return
+		}
+		product, unit := s.pay.cfg.productFor(input.Engine)
+		order := PayOrder{ID: id, OpenID: owner, ProductID: product, UnitPrice: unit, Pages: file.Pages,
+			Engine: input.Engine, LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path,
+			FileHash: file.Hash, Name: file.Name, State: "paid", Provided: true, CreatedAt: time.Now().Unix(),
+			Attach: id, UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, CreditPages: referralPages}
+		if err := s.pay.store.add(order); err != nil {
+			writeError(w, 500, "订单保存失败")
+			return
+		}
+		saved = true
+		writeJSON(w, 200, map[string]any{"order": orderView(order)})
+		return
+	}
 	// The client platform only decides rounding up; claiming iOS can never lower the price.
 	product, unit, quantity, total := s.pay.cfg.orderAmounts(input.Engine, billed, input.Platform == "ios")
 	if total > 10000000 {
@@ -396,7 +435,7 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		Pages: file.Pages, Quantity: quantity, Total: total, Engine: input.Engine,
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path,
 		FileHash: file.Hash, Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
-		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit}
+		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, CreditPages: referralPages}
 	signData, _ := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID,
 		"buyQuantity": order.Quantity, "env": 0, "currencyType": "CNY",
 		"productId": order.ProductID, "goodsPrice": order.UnitPrice, "outTradeNo": id, "attach": id})

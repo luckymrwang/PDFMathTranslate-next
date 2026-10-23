@@ -42,11 +42,15 @@ func testPayServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	referrals, err := openReferralStore(store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &Server{cfg: &Config{AppID: defaultAppID}, tasks: newTaskRegistry(),
 		pay: &PayService{cfg: &PayConfig{Enabled: true, OfferID: "offer", AppKey: "app-key",
 			NotifyToken: "notify-token", AESKey: strings.TrimRight(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), "="),
 			StandardProduct: "standard", EnhancedProduct: "enhanced", StandardPrice: 10, EnhancedPrice: 50},
-			store: store, sessions: &paySessions{keys: make(map[string]paySession)}}}
+			store: store, sessions: &paySessions{keys: make(map[string]paySession)}, referrals: referrals}}
 }
 
 func ownRequest(method, path, owner string, body io.Reader) *http.Request {

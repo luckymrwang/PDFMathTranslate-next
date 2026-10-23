@@ -13,15 +13,17 @@ async function run() {
     pay: async () => { throw { errMsg: 'requestVirtualPayment:fail cancel' } } }
   const config = { enabled: true, trial_enabled: true, trial_available: true, trial_pages: 3, trial_engine: 'Bing',
     standard_price_fen: 10, enhanced_price_fen: 30, engine_prices_fen: { 'GPT-6': 40 } }
-  let orders = []
+  let orders = [], freeOrders = false
   const api = {
     getPayConfig: async () => config,
     createPreparedOrder: async (token, data) => {
       created.push({ token, data })
-      return data.trial ? { order: { id: 'trial-1', engine: 'Bing', pages: 3 } } : { order: { id: 'paid-1' }, payData: {} }
+      if (data.trial) return { order: { id: 'trial-1', engine: 'Bing', pages: 3 } }
+      return freeOrders ? { order: { id: 'free-1', state: 'paid' } } : { order: { id: 'paid-1' }, payData: {} }
     },
     listPayOrders: async () => ({ orders }),
     cancelPayOrder: async () => ({}),
+    queryPayOrder: async () => ({ state: 'paid' }),
     warmEngine: async () => ({}),
   }
   const sandbox = {
@@ -51,6 +53,9 @@ async function run() {
   }
 
   const home = load('pages/index/index.js')
+  home.onLoad({ ref: 'INVITE23' })
+  home.onLoad({ ref: 'OTHER234' })
+  assert.equal(cache['dev:invite_ref'], 'INVITE23', 'The first invite code is kept')
   await home.onPrimaryAction()
   assert.equal(created.length, 0, 'Empty homepage cannot create a trial')
   Object.assign(home.data, { filePath: 'file.pdf', fileName: 'file.pdf', filePreparation: 'ready', engine: 'GPT-6', mode: 'enhanced' })
@@ -61,6 +66,7 @@ async function run() {
   assert.equal(created.length, 1, 'Double taps cannot consume multiple trials')
   assert.equal(created[0].data.trial, true)
   assert.equal(created[0].data.engine, 'Bing', 'Trial uses standard engine independently of full-document choice')
+  assert.equal(created[0].data.ref, 'INVITE23', 'The trial carries the invite code')
   assert.equal(home.data.paymentSheet, false, 'No payment dialog for trial')
   assert.equal(navigated, 1)
   const trialJob = app.globalData.translation
@@ -106,6 +112,17 @@ async function run() {
   assert.equal(home.quoteValues(12, 'Bing').creditPages, 0)
   assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '1.20')
 
+  // Referral pages cover standard pages only; a fully covered order skips WeChat payment.
+  home.setData({ creditPages: 5 })
+  assert.equal(home.quoteValues(12, 'Bing').referralPages, 5)
+  assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '0.70')
+  assert.equal(home.quoteValues(12, 'GPT-6').referralPages, 0, 'AI models are not covered')
+  home.setData({ creditPages: 20 })
+  assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '0.00')
+  home.setData({ inviteCode: 'MINE2345' })
+  assert.ok(home.onShareAppMessage().path.endsWith('?ref=MINE2345'))
+  home.setData({ creditPages: 0 })
+
   // Upgrade sheet: credit the trial pages, switch engines, and send the trial to the gateway.
   Object.assign(home.data, { engines: ['DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'], engine: 'GPT-6', mode: 'enhanced', pageCount: 12, sourceIndex: 2, targetIndex: 0 })
   home.availableEngines = new Set(['Bing', 'DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'])
@@ -127,6 +144,17 @@ async function run() {
   const paid = created[created.length - 1].data
   assert.equal(paid.upgrade_from, 'trial-1')
   assert.equal(paid.engine, 'DeepSeek-V4.1-Flash')
-  console.log('PASS: three-page trial, upgrade banner, trial result upgrade, engine choice and trial-page credit')
+  // Fully covered by referral pages: no WeChat payment, straight to progress.
+  freeOrders = true
+  const before = navigated
+  home.upgrade = null
+  home.setData({ creditPages: 20, engines: ['Bing'], engine: 'Bing', mode: 'standard', paying: false })
+  home.setData(home.quoteValues(12, 'Bing'))
+  home.paymentIntent = { job: home.makeJob(), fileToken: 'free-file' }
+  payment.assertPaymentSupported = () => { throw new Error('free orders must not require WeChat payment') }
+  await home.confirmTranslation()
+  assert.equal(navigated, before + 1, 'Free order opens the progress page')
+  assert.equal(app.globalData.translation.orderID, 'free-1')
+  console.log('PASS: three-page trial, upgrade banner, trial result upgrade, engine choice, trial-page and referral credit')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

@@ -46,8 +46,12 @@ func main() {
 		if err := cleanupPreparedFiles(filepath.Join(store.dir, "uploads")); err != nil {
 			log.Fatalf("preparation cleanup error: %v", err)
 		}
+		referrals, err := openReferralStore(payConfig.Dir)
+		if err != nil {
+			log.Fatalf("referral storage error: %v", err)
+		}
 		srv.pay = &PayService{cfg: payConfig, store: store, client: newXPayClient(cfg, payConfig),
-			sessions: &paySessions{keys: make(map[string]paySession)}}
+			sessions: &paySessions{keys: make(map[string]paySession)}, referrals: referrals}
 		for _, order := range store.all() {
 			for _, taskID := range order.TaskHistory {
 				srv.tasks.set(taskID, order.OpenID)
@@ -83,6 +87,7 @@ func main() {
 	mux.Handle("/pay/orders", srv.authRequired(http.HandlerFunc(srv.handlePayOrders)))
 	mux.Handle("/pay/orders/", srv.authRequired(http.HandlerFunc(srv.handlePayOrders)))
 	mux.Handle("/pay/query", srv.authRequired(http.HandlerFunc(srv.handlePayQuery)))
+	mux.Handle("/pay/referral", srv.authRequired(http.HandlerFunc(srv.handleReferral)))
 	mux.HandleFunc("/pay/notify", srv.handlePayNotify)
 
 	httpServer := &http.Server{

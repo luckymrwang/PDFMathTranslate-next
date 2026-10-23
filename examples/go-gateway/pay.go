@@ -20,12 +20,13 @@ import (
 )
 
 type PayService struct {
-	cfg      *PayConfig
-	store    *OrderStore
-	client   *XPayClient
-	sessions *paySessions
-	createMu sync.Mutex
-	locks    orderLocks
+	cfg       *PayConfig
+	store     *OrderStore
+	client    *XPayClient
+	sessions  *paySessions
+	createMu  sync.Mutex
+	locks     orderLocks
+	referrals *ReferralStore
 }
 
 func (s *Server) payEnabled() bool { return s.pay != nil && s.pay.cfg.Enabled }
@@ -39,6 +40,7 @@ func orderView(order PayOrder) map[string]any {
 	return map[string]any{"id": order.ID, "state": order.State, "quantity": order.Quantity,
 		"pages":          order.PageCount(),
 		"document_pages": order.DocumentPages, "trial_credit_pages": order.TrialCredit, "upgrade_from": order.UpgradeFrom,
+		"credit_pages":   order.CreditPages,
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial}
@@ -73,7 +75,8 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"enabled": s.payEnabled(), "trial_enabled": true, "standard_price_fen": s.pay.cfg.StandardPrice,
 		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices,
 		"ios_unit_fen": s.pay.cfg.IOSUnit, "ios_min_fen": iosMinFen,
-		"trial_available": !s.pay.store.hasTrial(openid), "trial_pages": trialPages, "trial_engine": trialEngine})
+		"trial_available": !s.pay.store.hasTrial(openid), "trial_pages": trialPages, "trial_engine": trialEngine,
+		"credit_pages": s.pay.referrals.credit(openid)})
 }
 
 // uploadFile is also used for server-side PDF inspection. Never send local
@@ -621,6 +624,7 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			s.settleReferrals(order)
 			if order.Delivery == "archived" && s.storage != nil && order.MonoKey == "" && order.DualKey == "" {
 				if unlock, ok := s.pay.locks.acquire(order.ID, false); ok {
 					uploadCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -647,7 +651,8 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 				cancel()
 				continue
 			}
-			if queryWeChat && !order.Trial && (order.State == "pending" || order.State == "paid" || order.State == "submitted") {
+			// Trials and fully credited orders never went through WeChat payment.
+			if queryWeChat && !order.Trial && order.Total > 0 && (order.State == "pending" || order.State == "paid" || order.State == "submitted") {
 				checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				if err := s.reconcileOrder(checkCtx, order.ID); err != nil {
 					log.Printf("virtual payment reconcile failed (order=%s): %v", order.ID, err)

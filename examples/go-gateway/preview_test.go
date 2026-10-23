@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -48,7 +49,7 @@ func TestPreviewRendersFirstPageOnceAndExpiresWithOrder(t *testing.T) {
 	if renders.Load() != 1 {
 		t.Fatal("preview must be rendered once and then served from disk", renders.Load())
 	}
-	if err := s.expireOrder(t.Context(), order.ID); err != nil {
+	if err := s.expireOrder(context.Background(), order.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(s.previewPath(order.ID)); !os.IsNotExist(err) {
