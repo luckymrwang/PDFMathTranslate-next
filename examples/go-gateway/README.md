@@ -196,7 +196,7 @@ wx.uploadFile({
 
 邀请奖励：`GET /pay/referral` 返回当前用户的邀请码与剩余奖励页数（`/pay/config` 的
 `credit_pages` 同为余额）。新用户带 `ref` 邀请码创建试译时记录邀请人；该试译交付后
-邀请人获得 3 页，每人最多奖励 10 位好友。奖励页只抵扣标准翻译（Bing/Google），下单
+邀请人获得 5 页，邀请人数不设上限。奖励页只抵扣标准翻译（Bing/Google），下单
 时预留，订单关闭或退款后自动退回；全部被抵扣的订单无需支付，直接进入已支付状态。
 奖励数据保存在 `VIRTUALPAY_DATA_DIR/referrals.json`。仅试译环境可
 设置 `TRIAL_ENABLED=true`、`VIRTUALPAY_ENABLED=false`，此时免费试译无需

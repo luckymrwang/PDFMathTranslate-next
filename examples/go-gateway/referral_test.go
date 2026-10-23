@@ -63,15 +63,16 @@ func TestReferralRewardsDeliveredTrialsAndPaysForStandardPages(t *testing.T) {
 	if s.pay.referrals.credit("inviter") != 0 {
 		t.Fatal("self-invite rewarded")
 	}
-	for i := 0; i < referralCap+1; i++ {
+	const friends = 12
+	for i := 0; i < friends; i++ {
 		trial := order(fmt.Sprintf("friend-%d", i), map[string]any{"trial": true, "engine": "Bing", "ref": view.Code})["order"].(map[string]any)
 		if i == 0 && s.pay.referrals.credit("inviter") != 0 {
 			t.Fatal("rewarded before the trial was delivered")
 		}
 		deliver(trial["id"].(string))
 	}
-	if got := s.pay.referrals.credit("inviter"); got != referralCap*referralRewardPages {
-		t.Fatal("reward must be per delivered trial, once each, capped", got)
+	if got := s.pay.referrals.credit("inviter"); got != friends*referralRewardPages {
+		t.Fatal("reward must be per delivered trial, once each, without a cap", got)
 	}
 
 	// Credit only covers standard translation; a fully covered order needs no payment.

@@ -12,11 +12,9 @@ import (
 )
 
 // An inviter earns referralRewardPages free standard-translation pages for each
-// invited new user whose free trial is delivered, for at most referralCap friends.
-const (
-	referralRewardPages = 3
-	referralCap         = 10
-)
+// invited new user whose free trial is delivered. There is no cap: every reward
+// needs a real new user's delivered trial, and the pages only cover cheap Bing/Google.
+const referralRewardPages = 5
 
 type referralUser struct {
 	Code string `json:"code"`
@@ -135,7 +133,7 @@ func (s *ReferralStore) inviter(code, invitee string) string {
 	return ""
 }
 
-// reward credits the inviter once per invitee, up to referralCap invitees.
+// reward credits the inviter once per invitee.
 func (s *ReferralStore) reward(inviter, invitee string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,9 +145,6 @@ func (s *ReferralStore) reward(inviter, invitee string) error {
 		if done == invitee {
 			return nil
 		}
-	}
-	if len(user.Rewarded) >= referralCap {
-		return nil
 	}
 	user.Rewarded = append(user.Rewarded, invitee)
 	user.Credit += referralRewardPages
@@ -201,7 +196,7 @@ func (s *Server) handleReferral(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"code": user.Code, "credit_pages": user.Credit, "invited": len(user.Rewarded),
-		"cap": referralCap, "reward_pages": referralRewardPages})
+		"reward_pages": referralRewardPages})
 }
 
 // settleReferrals rewards inviters for delivered trials and returns credit held by
