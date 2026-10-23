@@ -44,6 +44,7 @@ from fastapi import Header
 from fastapi import HTTPException
 from fastapi import UploadFile
 from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from pydantic import Field
 from sse_starlette.sse import EventSourceResponse
@@ -478,6 +479,44 @@ async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[
             except Exception as error:
                 raise HTTPException(status_code=503, detail="translation engine unavailable") from error
         return {"page_count": pages}
+
+
+@app.post("/v1/pdf/render")
+async def render_pdf_page(file: UploadFile, data: str = Form(default="{}")) -> Response:
+    """Renders one page as a JPEG result preview; the gateway enforces ownership."""
+    try:
+        options = json.loads(data)
+        page = int(options.get("page", 1))
+        width = int(options.get("width", 720))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise HTTPException(status_code=400, detail="invalid render options") from error
+    if not 1 <= page <= 1000 or not 200 <= width <= 1600:
+        raise HTTPException(status_code=400, detail="invalid render options")
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+        size = 0
+        while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+            size += len(chunk)
+            if size > 100 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="PDF too large")
+            tmp.write(chunk)
+        tmp.flush()
+
+        def render():
+            import pymupdf
+
+            try:
+                with pymupdf.open(tmp.name) as document:
+                    if not document.is_pdf or document.needs_pass or page > document.page_count:
+                        raise ValueError("page unavailable")
+                    target = document[page - 1]
+                    zoom = width / target.rect.width
+                    pixmap = target.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                    return pixmap.tobytes("jpg", jpg_quality=80)
+            except Exception as error:
+                raise HTTPException(status_code=422, detail="cannot render PDF") from error
+
+        image = await asyncio.to_thread(render)
+    return Response(content=image, media_type="image/jpeg")
 
 
 @app.post("/v1/translate")

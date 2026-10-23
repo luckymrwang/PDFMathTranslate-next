@@ -240,7 +240,7 @@ func (s *Server) expireOrder(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	for _, path := range []string{order.MonoFile, order.DualFile, order.FilePath} {
+	for _, path := range []string{order.MonoFile, order.DualFile, order.FilePath, s.previewPath(order.ID)} {
 		if path != "" {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
@@ -426,6 +426,8 @@ func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order Pa
 		http.ServeContent(w, r, "", info.ModTime(), file)
 	case r.Method == http.MethodGet && sub == "result":
 		s.writePaidResult(w, r, order)
+	case r.Method == http.MethodGet && sub == "preview" && order.Delivery == "archived":
+		s.writePreview(w, r, order)
 	default:
 		return false
 	}

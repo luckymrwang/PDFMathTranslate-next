@@ -66,6 +66,25 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status_code, 422)
 
+    async def test_render_returns_requested_page_as_jpeg(self):
+        result = await self.client.post(
+            "/v1/pdf/render", files={"file": ("document.pdf", self.pdf, "application/pdf")},
+            data={"data": '{"page": 2, "width": 400}'},
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers["content-type"], "image/jpeg")
+        self.assertTrue(result.content.startswith(b"\xff\xd8"))
+        result = await self.client.post(
+            "/v1/pdf/render", files={"file": ("document.pdf", self.pdf, "application/pdf")},
+            data={"data": '{"page": 3}'},
+        )
+        self.assertEqual(result.status_code, 422)
+        result = await self.client.post(
+            "/v1/pdf/render", files={"file": ("document.pdf", self.pdf, "application/pdf")},
+            data={"data": '{"width": 5000}'},
+        )
+        self.assertEqual(result.status_code, 400)
+
     async def test_bad_pdf_rejected(self):
         result = await self.client.post(
             "/v1/pdf/inspect", files={"file": ("document.pdf", b"not a PDF", "application/pdf")}

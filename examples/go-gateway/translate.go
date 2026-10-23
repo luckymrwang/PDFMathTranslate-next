@@ -183,6 +183,7 @@ func (s *Server) handleTranslateSubmit(w http.ResponseWriter, r *http.Request) {
 //	GET    /api/translate/{id}/stream  -> SSE progress
 //	GET    /api/translate/{id}/mono    -> download mono PDF
 //	GET    /api/translate/{id}/dual    -> download dual PDF
+//	GET    /api/translate/{id}/preview -> first translated page as JPEG (paid and trial orders)
 //	DELETE /api/translate/{id}         -> cancel
 func (s *Server) handleTranslateTask(w http.ResponseWriter, r *http.Request) {
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
