@@ -38,7 +38,7 @@ func (s *Server) ordersEnabled() bool {
 func orderView(order PayOrder) map[string]any {
 	return map[string]any{"id": order.ID, "state": order.State, "quantity": order.Quantity,
 		"pages":          order.PageCount(),
-		"document_pages": order.DocumentPages,
+		"document_pages": order.DocumentPages, "trial_credit_pages": order.TrialCredit, "upgrade_from": order.UpgradeFrom,
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial}

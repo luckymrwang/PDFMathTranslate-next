@@ -213,3 +213,63 @@ func TestTrialFailureDoesNotMentionPaymentOrRefund(t *testing.T) {
 		}
 	}
 }
+
+func TestTrialUpgradeChargesOnlyUntranslatedPagesOnce(t *testing.T) {
+	s := testPayServer(t)
+	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		writeJSON(w, 200, map[string]bool{"ready": true})
+	}))
+	defer python.Close()
+	s.pdf2zh = NewPdf2zhClient(python.URL)
+	s.pay.sessions.set("token", "session")
+	content := []byte("%PDF-upgrade")
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+	trial := PayOrder{ID: "trial-1", OpenID: "owner", State: "submitted", Trial: true, Pages: 3, DocumentPages: 12, FileHash: hash}
+	if err := s.pay.store.add(trial); err != nil {
+		t.Fatal(err)
+	}
+	upgrade := func(owner, fileHash string) *httptest.ResponseRecorder {
+		path := t.TempDir() + "/a.pdf"
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		s.prepared.Lock()
+		s.prepared.files = map[string]preparedPDF{"f": {Owner: owner, Path: path, Name: "a.pdf", Hash: fileHash,
+			Pages: 12, Expires: time.Now().Add(time.Hour)}}
+		s.prepared.Unlock()
+		payload, _ := json.Marshal(map[string]any{"file_token": "f", "upgrade_from": "trial-1",
+			"engine": "Bing", "lang_in": "en", "lang_out": "zh"})
+		req := ownRequest("POST", "/pay/order/prepared", owner, bytes.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer token")
+		out := httptest.NewRecorder()
+		s.handlePreparedOrder(out, req)
+		return out
+	}
+	if got := upgrade("owner", strings.Repeat("0", 64)); got.Code != 409 {
+		t.Fatal("credit applied to a different file", got.Code)
+	}
+	if got := upgrade("stranger", hash); got.Code != 409 {
+		t.Fatal("credit applied to another user's trial", got.Code)
+	}
+	got := upgrade("owner", hash)
+	if got.Code != 200 {
+		t.Fatal(got.Code, got.Body.String())
+	}
+	var created struct {
+		Order map[string]any `json:"order"`
+	}
+	json.Unmarshal(got.Body.Bytes(), &created)
+	// 12 pages translated, 3 already delivered by the trial, so 9 standard pages are billed.
+	if created.Order["pages"].(float64) != 12 || created.Order["quantity"].(float64) != 9 ||
+		created.Order["total_fen"].(float64) != 90 || created.Order["trial_credit_pages"].(float64) != 3 {
+		t.Fatal("unexpected upgrade order", got.Body.String())
+	}
+	if err := s.pay.store.update(created.Order["id"].(string), func(o *PayOrder) error { o.State = "paid"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if again := upgrade("owner", hash); again.Code != 409 {
+		t.Fatal("trial credited twice", again.Code)
+	}
+}

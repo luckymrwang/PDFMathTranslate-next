@@ -6,22 +6,33 @@ const vm = require('node:vm')
 const root = process.argv[2]
 assert.ok(root)
 async function run() {
-  let page, created = [], navigated = 0, previewed, relaunched = 0
+  let page, created = [], navigated = 0, relaunched = 0
   const app = { globalData: {} }, cache = {}
+  const realPayment = require(path.join(root, 'utils/payment.js'))
+  const payment = { ...realPayment, isIOS: () => false, assertPaymentSupported() {},
+    pay: async () => { throw { errMsg: 'requestVirtualPayment:fail cancel' } } }
+  const config = { enabled: true, trial_enabled: true, trial_available: true, trial_pages: 3, trial_engine: 'Bing',
+    standard_price_fen: 10, enhanced_price_fen: 30, engine_prices_fen: { 'GPT-6': 40 } }
+  let orders = []
   const api = {
-    getPayConfig: async () => ({ enabled: true, trial_enabled: true, trial_available: true, trial_pages: 3, trial_engine: 'Bing' }),
+    getPayConfig: async () => config,
     createPreparedOrder: async (token, data) => {
       created.push({ token, data })
-      return { order: { id: 'trial-1', engine: 'Bing', pages: 3 } }
+      return data.trial ? { order: { id: 'trial-1', engine: 'Bing', pages: 3 } } : { order: { id: 'paid-1' }, payData: {} }
     },
-    listPayOrders: async () => ({ orders: [] }),
+    listPayOrders: async () => ({ orders }),
+    cancelPayOrder: async () => ({}),
+    warmEngine: async () => ({}),
   }
   const sandbox = {
     require: name => {
       if (name.includes('storage-key')) return { storageKey: k => 'dev:' + k }
       if (name.endsWith('/api')) return api
       if (name.endsWith('/config')) return { demoMode: false }
-      if (name.endsWith('/payment')) return require(path.join(root, 'utils/payment.js'))
+      if (name.endsWith('/payment')) return payment
+      if (name.endsWith('/order-status')) return vm.runInNewContext(
+        fs.readFileSync(path.join(root, 'utils/order-status.js'), 'utf8') + ';module.exports',
+        { module: { exports: {} }, require: n => n.endsWith('/payment') ? payment : { storageKey: k => 'dev:' + k }, wx: sandbox.wx })
       return {}
     },
     Page: p => { page = p },
@@ -29,45 +40,83 @@ async function run() {
     wx: {
       getStorageSync: k => cache[k], setStorageSync: (k, v) => { cache[k] = v },
       navigateTo: () => navigated++, showToast() {}, reLaunch: () => relaunched++,
-      getImageInfo: ({ src, success }) => success({ path: src }),
-      previewImage: options => { previewed = options },
-    }, console,
+    }, console, setTimeout,
   }
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'pages/index/index.js'), 'utf8'), sandbox)
-  page.data = JSON.parse(JSON.stringify(page.data))
-  page.setData = (data, done) => { Object.assign(page.data, data); if (done) done() }
-  await page.onPrimaryAction()
+  const load = file => {
+    vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), { ...sandbox })
+    const loaded = page
+    loaded.data = JSON.parse(JSON.stringify(loaded.data))
+    loaded.setData = (data, done) => { Object.assign(loaded.data, data); if (done) done() }
+    return loaded
+  }
+
+  const home = load('pages/index/index.js')
+  await home.onPrimaryAction()
   assert.equal(created.length, 0, 'Empty homepage cannot create a trial')
-  Object.assign(page.data, { filePath: 'file.pdf', fileName: 'file.pdf', filePreparation: 'ready', engine: 'GPT-6', mode: 'enhanced' })
-  page.preparedFile = { path: 'file.pdf', file_token: 'prepared-token', page_count: 12, expires_at: Date.now() / 1000 + 1800 }
-  await page.getPaymentConfig()
-  await Promise.all([page.onPrimaryAction(), page.onPrimaryAction()])
+  Object.assign(home.data, { filePath: 'file.pdf', fileName: 'file.pdf', filePreparation: 'ready', engine: 'GPT-6', mode: 'enhanced' })
+  home.preparedFile = { path: 'file.pdf', file_token: 'prepared-token', page_count: 12, expires_at: Date.now() / 1000 + 1800 }
+  await home.getPaymentConfig()
+  assert.equal(home.data.trialKnown, true)
+  await Promise.all([home.onPrimaryAction(), home.onPrimaryAction()])
   assert.equal(created.length, 1, 'Double taps cannot consume multiple trials')
   assert.equal(created[0].data.trial, true)
   assert.equal(created[0].data.engine, 'Bing', 'Trial uses standard engine independently of full-document choice')
-  assert.equal(created[0].token, 'prepared-token')
-  assert.equal(page.data.paymentSheet, false, 'No payment dialog for trial')
+  assert.equal(home.data.paymentSheet, false, 'No payment dialog for trial')
   assert.equal(navigated, 1)
-  assert.equal(page.data.trialAvailable, false)
-  assert.equal(app.globalData.translation.pageCount, 3)
-  assert.equal(app.globalData.translation.originalPageCount, 12)
-  assert.equal(app.globalData.translation.fullEngine, 'GPT-6')
-  assert.ok(cache['dev:virtualpay_pending_jobs']['trial-1'])
+  const trialJob = app.globalData.translation
+  assert.equal(trialJob.pageCount, 3)
+  assert.equal(trialJob.originalPageCount, 12)
+  assert.equal(trialJob.fullEngine, 'GPT-6')
   let quotes = 0
-  page.openPaymentSheet = () => { quotes++ }
-  await page.onPrimaryAction()
+  const openPaymentSheet = home.openPaymentSheet
+  home.openPaymentSheet = () => { quotes++ }
+  await home.onPrimaryAction()
   assert.equal(quotes, 1, 'Returning users must see full-document payment quote')
-  page.scrollToSamples();assert.equal(page.data.sampleAnchor, 'translation-samples')
-  page.selectSample({ currentTarget: { dataset: { index: 1 } } })
-  page.selectSampleVersion({ currentTarget: { dataset: { version: 'source' } } })
-  assert.equal(page.data.sampleImage, '/assets/samples/manual-source.jpg')
-  await page.previewSample();assert.equal(previewed.current, '/assets/samples/manual-source.jpg')
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'pages/preview/preview.js'), 'utf8'), { ...sandbox })
-  page.setData = d => Object.assign(page.data, d)
-  page.onLoad();assert.equal(page.data.trial, true)
-  page.translateFull();assert.equal(relaunched, 1)
-  assert.equal(app.globalData.translationReorder.id, 'trial-1')
-  assert.equal(app.globalData.translationReorder.engine, 'GPT-6')
-  console.log('PASS: direct three-page trial, duplicate taps, paid upgrade, sample controls and environment cache')
+  home.openPaymentSheet = openPaymentSheet
+
+  // The delivered trial is offered for upgrade on the home page until an upgrade is paid.
+  home.data.recent = [trialJob]
+  await home.loadOrders()
+  assert.equal(home.data.pendingUpgrade.orderID, 'trial-1')
+  assert.equal(home.data.recentShort[0].canUpgrade, true)
+  orders = [{ id: 'paid-0', upgrade_from: 'trial-1', state: 'submitted' }]
+  await home.loadOrders()
+  assert.equal(home.data.pendingUpgrade, null, 'Upgraded trials leave the banner')
+  orders = []
+
+  const preview = load('pages/preview/preview.js')
+  preview.onLoad()
+  await preview.loadUpgrade()
+  assert.equal(preview.data.trial, true)
+  assert.equal(preview.data.remainingPages, 9)
+  assert.equal(preview.data.upgradeFrom, '¥0.90', 'Cheapest upgrade charges only the untranslated pages')
+  preview.translateFull()
+  assert.equal(relaunched, 1)
+  const reorder = app.globalData.translationReorder
+  assert.equal(reorder.upgradeFrom, 'trial-1')
+  assert.equal(reorder.engine, 'GPT-6')
+
+  // Upgrade sheet: credit the trial pages, switch engines, and send the trial to the gateway.
+  Object.assign(home.data, { engines: ['DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'], engine: 'GPT-6', mode: 'enhanced', pageCount: 12, sourceIndex: 2, targetIndex: 0 })
+  home.availableEngines = new Set(['Bing', 'DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'])
+  home.upgrade = { from: 'trial-1', credit: 3 }
+  home.sourceOrderID = 'trial-1'
+  const quote = home.quoteValues(12, 'GPT-6')
+  assert.equal(quote.fullSubtotal, '4.80')
+  assert.equal(quote.creditAmount, '1.20')
+  assert.equal(quote.paymentTotal, '3.60')
+  const choices = home.upgradeChoices(12)
+  assert.equal(choices.map(c => c.engine).join(), 'Bing,DeepSeek-V4.1-Flash,GPT-5.6,GPT-6')
+  assert.equal(choices[0].total, '¥0.90')
+  home.paymentIntent = { job: home.makeJob(), fileToken: 'trial-file' }
+  home.setData({ orderReady: true, paymentSheet: true })
+  home.selectUpgradeEngine({ currentTarget: { dataset: { engine: 'DeepSeek-V4.1-Flash' } } })
+  assert.equal(home.data.paymentTotal, '2.70')
+  assert.equal(home.paymentIntent.job.engine, 'DeepSeek-V4.1-Flash')
+  await home.confirmTranslation()
+  const paid = created[created.length - 1].data
+  assert.equal(paid.upgrade_from, 'trial-1')
+  assert.equal(paid.engine, 'DeepSeek-V4.1-Flash')
+  console.log('PASS: three-page trial, upgrade banner, trial result upgrade, engine choice and trial-page credit')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

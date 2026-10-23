@@ -284,6 +284,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		LangOut   string `json:"lang_out"`
 		Platform  string `json:"platform"`
 		Trial     bool   `json:"trial"`
+		// UpgradeFrom names the trial order of this file whose pages are not charged again.
+		UpgradeFrom string `json:"upgrade_from"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil {
 		writeError(w, 400, "invalid settings")
@@ -366,8 +368,21 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"order": orderView(order)})
 		return
 	}
+	billed, credit := file.Pages, 0
+	if input.UpgradeFrom != "" {
+		pages, ok := s.pay.store.trialCredit(input.UpgradeFrom, owner, file.Hash)
+		if !ok {
+			writeError(w, 409, "试译抵扣已失效，请重新打开报价")
+			return
+		}
+		if credit = pages; credit >= file.Pages {
+			writeError(w, 409, "试译已覆盖全文，无需升级")
+			return
+		}
+		billed -= credit
+	}
 	// The client platform only decides rounding up; claiming iOS can never lower the price.
-	product, unit, quantity, total := s.pay.cfg.orderAmounts(input.Engine, file.Pages, input.Platform == "ios")
+	product, unit, quantity, total := s.pay.cfg.orderAmounts(input.Engine, billed, input.Platform == "ios")
 	if total > 10000000 {
 		writeError(w, 400, "订单金额超过限额")
 		return
@@ -380,7 +395,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 	order := PayOrder{ID: id, OpenID: owner, ProductID: product, UnitPrice: unit,
 		Pages: file.Pages, Quantity: quantity, Total: total, Engine: input.Engine,
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path,
-		FileHash: file.Hash, Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id}
+		FileHash: file.Hash, Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
+		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit}
 	signData, _ := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID,
 		"buyQuantity": order.Quantity, "env": 0, "currencyType": "CNY",
 		"productId": order.ProductID, "goodsPrice": order.UnitPrice, "outTradeNo": id, "attach": id})

@@ -122,6 +122,10 @@ type PayOrder struct {
 	Provided                                                            bool
 	// DocumentPages preserves the full source length for a trial-to-paid upgrade.
 	DocumentPages int
+	// UpgradeFrom is the trial order whose translated pages were credited; TrialCredit
+	// is how many pages were left out of Quantity. Pages still covers the whole document.
+	UpgradeFrom string
+	TrialCredit int
 	// Trial orders are free and never touch WeChat payment.
 	Trial                bool
 	CreatedAt, LastQuery int64
@@ -257,6 +261,23 @@ func (s *OrderStore) addTrial(order PayOrder) error {
 }
 
 var errTrialUsed = errors.New("trial already used")
+
+// trialCredit returns how many already-translated trial pages an upgrade of the same
+// file may leave unpaid. Each trial is credited once: a paid or delivered upgrade uses it up.
+func (s *OrderStore) trialCredit(trialID, owner, fileHash string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	trial, ok := s.orders[trialID]
+	if !ok || !trial.Trial || trial.OpenID != owner || trial.FileHash == "" || trial.FileHash != fileHash {
+		return 0, false
+	}
+	for _, order := range s.orders {
+		if order.UpgradeFrom == trialID && (order.State == "paid" || order.State == "submitted") {
+			return 0, false
+		}
+	}
+	return trial.PageCount(), true
+}
 
 func (s *OrderStore) get(id string) (PayOrder, bool) {
 	s.mu.Lock()
