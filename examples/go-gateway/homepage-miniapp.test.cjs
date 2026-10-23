@@ -96,6 +96,12 @@ async function run() {
   assert.equal(reorder.upgradeFrom, 'trial-1')
   assert.equal(reorder.engine, 'GPT-6')
 
+  // A regular order offers every engine in the payment sheet and credits nothing.
+  home.availableEngines = new Set(['Bing', 'Google', 'DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'])
+  assert.equal(home.upgradeChoices(12).map(c => c.engine).join(), 'Bing,Google,DeepSeek-V4.1-Flash,GPT-5.6,GPT-6')
+  assert.equal(home.quoteValues(12, 'Bing').creditPages, 0)
+  assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '1.20')
+
   // Upgrade sheet: credit the trial pages, switch engines, and send the trial to the gateway.
   Object.assign(home.data, { engines: ['DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'], engine: 'GPT-6', mode: 'enhanced', pageCount: 12, sourceIndex: 2, targetIndex: 0 })
   home.availableEngines = new Set(['Bing', 'DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'])
