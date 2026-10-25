@@ -2,13 +2,10 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
-	"sync"
 )
 
 // An inviter earns referralRewardPages free standard-translation pages for each
@@ -25,187 +22,174 @@ type referralUser struct {
 }
 
 // ReferralStore keeps invite codes and page credits in one JSON file next to the orders.
-type ReferralStore struct {
-	mu    sync.Mutex
-	path  string
-	users map[string]*referralUser
-	codes map[string]string
-}
+type ReferralStore struct{ db *sql.DB }
 
 func openReferralStore(dir string) (*ReferralStore, error) {
-	store := &ReferralStore{path: filepath.Join(dir, "referrals.json"),
-		users: make(map[string]*referralUser), codes: make(map[string]string)}
-	data, err := os.ReadFile(store.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return store, nil
-	}
+	db, err := openDatabase(dir)
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(data, &store.users); err != nil {
-		return nil, errors.New("invalid referral file")
-	}
-	for openid, user := range store.users {
-		store.codes[user.Code] = openid
-	}
-	return store, nil
+	return &ReferralStore{db: db}, nil
 }
 
-func (s *ReferralStore) saveLocked() error {
-	data, err := json.Marshal(s.users)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".referrals-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), s.path)
-}
-
-// userLocked returns the user's record, creating it with a fresh invite code.
-func (s *ReferralStore) userLocked(openid string) (*referralUser, error) {
-	if user, ok := s.users[openid]; ok {
-		return user, nil
+func referralUserTx(tx *databaseTx, owner string) (referralUser, error) {
+	var user referralUser
+	err := tx.QueryRow("SELECT code,credit FROM referral_users WHERE openid=?", owner).Scan(&user.Code, &user.Credit)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return user, err
 	}
 	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	for {
 		var raw [8]byte
 		if _, err := rand.Read(raw[:]); err != nil {
-			return nil, err
+			return user, err
 		}
-		code := make([]byte, len(raw))
 		for i, b := range raw {
-			code[i] = alphabet[int(b)%len(alphabet)]
+			raw[i] = alphabet[int(b)%len(alphabet)]
 		}
-		if _, taken := s.codes[string(code)]; !taken {
-			user := &referralUser{Code: string(code)}
-			s.users[openid] = user
-			s.codes[user.Code] = openid
+		user.Code = string(raw[:])
+		result, err := tx.Exec("INSERT INTO referral_users(openid,code,credit) VALUES(?,?,0) ON CONFLICT(code) DO NOTHING", owner, user.Code)
+		if err != nil {
+			return user, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return user, err
+		}
+		if n == 1 {
 			return user, nil
 		}
 	}
 }
 
-func (s *ReferralStore) view(openid string) (referralUser, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, existed := s.users[openid]
-	user, err := s.userLocked(openid)
+func (s *ReferralStore) view(owner string) (referralUser, error) {
+	tx, err := beginDatabaseTx(s.db)
 	if err != nil {
 		return referralUser{}, err
 	}
-	if !existed {
-		if err := s.saveLocked(); err != nil {
-			return referralUser{}, err
+	defer tx.Rollback()
+	user, err := referralUserTx(tx, owner)
+	if err != nil {
+		return user, err
+	}
+	rows, err := tx.Query("SELECT invitee FROM referral_rewards WHERE inviter=? ORDER BY invitee", owner)
+	if err != nil {
+		return user, err
+	}
+	for rows.Next() {
+		var invitee string
+		if err := rows.Scan(&invitee); err != nil {
+			rows.Close()
+			return user, err
 		}
+		user.Rewarded = append(user.Rewarded, invitee)
 	}
-	return *user, nil
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return user, err
+	}
+	return user, tx.Commit()
 }
 
-func (s *ReferralStore) credit(openid string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if user, ok := s.users[openid]; ok {
-		return user.Credit
-	}
-	return 0
+func (s *ReferralStore) credit(owner string) int {
+	var credit int
+	_ = s.db.QueryRow("SELECT credit FROM referral_users WHERE openid=?", owner).Scan(&credit)
+	return credit
 }
 
-// inviter resolves an invite code; nobody can invite themselves.
 func (s *ReferralStore) inviter(code, invitee string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if owner := s.codes[code]; owner != invitee {
-		return owner
-	}
-	return ""
+	var owner string
+	_ = s.db.QueryRow("SELECT openid FROM referral_users WHERE code=? AND openid<>?", code, invitee).Scan(&owner)
+	return owner
 }
 
-// reward credits the inviter once per invitee.
-func (s *ReferralStore) reward(inviter, invitee string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	user, err := s.userLocked(inviter)
+func rewardTx(tx *databaseTx, inviter, invitee string) error {
+	if _, err := referralUserTx(tx, inviter); err != nil {
+		return err
+	}
+	result, err := tx.Exec("INSERT INTO referral_rewards(inviter,invitee) VALUES(?,?) ON CONFLICT(invitee) DO NOTHING", inviter, invitee)
 	if err != nil {
 		return err
 	}
-	for _, done := range user.Rewarded {
-		if done == invitee {
-			return nil
-		}
-	}
-	user.Rewarded = append(user.Rewarded, invitee)
-	user.Credit += referralRewardPages
-	return s.saveLocked()
-}
-
-// reserve takes up to pages from the balance for a new order and returns how many.
-func (s *ReferralStore) reserve(openid string, pages int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	user, ok := s.users[openid]
-	if !ok || user.Credit <= 0 || pages <= 0 {
-		return 0, nil
-	}
-	used := min(user.Credit, pages)
-	user.Credit -= used
-	if err := s.saveLocked(); err != nil {
-		user.Credit += used
-		return 0, err
-	}
-	return used, nil
-}
-
-// restore returns pages reserved by an order that was closed or refunded.
-func (s *ReferralStore) restore(openid string, pages int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	user, err := s.userLocked(openid)
+	n, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	user.Credit += pages
-	if err := s.saveLocked(); err != nil {
-		user.Credit -= pages
-		return err
-	}
-	return nil
-}
-
-// returnOrder persists the balance and its idempotency key in the same file.
-// If saving the order flag fails afterwards, replaying this entry is harmless.
-func (s *ReferralStore) returnOrder(openid, orderID string, pages int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	user, err := s.userLocked(openid)
-	if err != nil {
-		return err
-	}
-	if user.Returned[orderID] {
+	if n == 0 {
 		return nil
 	}
-	if user.Returned == nil {
-		user.Returned = make(map[string]bool)
+	_, err = tx.Exec("UPDATE referral_users SET credit=credit+? WHERE openid=?", referralRewardPages, inviter)
+	return err
+}
+
+func (s *ReferralStore) reserve(owner string, pages int) (int, error) {
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
+		return 0, err
 	}
-	user.Returned[orderID] = true
-	user.Credit += pages
-	if err := s.saveLocked(); err != nil {
-		delete(user.Returned, orderID)
-		user.Credit -= pages
+	defer tx.Rollback()
+	var balance int
+	err = tx.QueryRow("SELECT credit FROM referral_users WHERE openid=?", owner).Scan(&balance)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	used := min(balance, max(0, pages))
+	if _, err := tx.Exec("UPDATE referral_users SET credit=credit-? WHERE openid=?", used, owner); err != nil {
+		return 0, err
+	}
+	return used, tx.Commit()
+}
+
+func (s *ReferralStore) restore(owner string, pages int) error {
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
 		return err
+	}
+	defer tx.Rollback()
+	if _, err := referralUserTx(tx, owner); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE referral_users SET credit=credit+? WHERE openid=?", pages, owner); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func returnOrderTx(tx *databaseTx, owner, orderID string, pages int) error {
+	if _, err := referralUserTx(tx, owner); err != nil {
+		return err
+	}
+	result, err := tx.Exec("INSERT INTO referral_returns(order_id,openid) VALUES(?,?) ON CONFLICT(order_id) DO NOTHING", orderID, owner)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	_, err = tx.Exec("UPDATE referral_users SET credit=credit+? WHERE openid=?", pages, owner)
+	return err
+}
+
+// Settlement and the state that causes it are committed together.
+func settleOrderTx(tx *databaseTx, order *PayOrder) error {
+	if order.Trial && order.ReferredBy != "" && order.Delivery == "archived" {
+		if err := rewardTx(tx, order.ReferredBy, order.OpenID); err != nil {
+			return err
+		}
+	}
+	if order.CreditPages > 0 && !order.CreditReturned && order.creditReleased() {
+		if err := returnOrderTx(tx, order.OpenID, order.ID, order.CreditPages); err != nil {
+			return err
+		}
+		order.CreditReturned = true
 	}
 	return nil
 }
@@ -232,25 +216,20 @@ func (s *Server) handleReferral(w http.ResponseWriter, r *http.Request) {
 // settleReferrals rewards inviters for delivered trials and returns credit held by
 // orders that ended unpaid or refunded. Both are idempotent and run on every sweep.
 func (s *Server) settleReferrals(order PayOrder) {
+	// Already rewarded deliveries need no further write. Failed reads are retried
+	// by the normal transaction instead of being mistaken for a settled trial.
 	if order.Trial && order.ReferredBy != "" && order.Delivery == "archived" {
-		if err := s.pay.referrals.reward(order.ReferredBy, order.OpenID); err != nil {
-			logReferral("reward", order.ID, err)
+		var inviter string
+		err := s.pay.store.db.QueryRow("SELECT inviter FROM referral_rewards WHERE invitee=?", order.OpenID).Scan(&inviter)
+		if err == nil {
+			return
 		}
 	}
-	if order.CreditPages > 0 && !order.CreditReturned && order.creditReleased() {
-		// Hold the order lock through the ledger write so payment cannot race a return.
-		err := s.pay.store.update(order.ID, func(current *PayOrder) error {
-			if current.CreditReturned || !current.creditReleased() {
-				return nil
-			}
-			if err := s.pay.referrals.returnOrder(current.OpenID, current.ID, current.CreditPages); err != nil {
-				return err
-			}
-			current.CreditReturned = true
-			return nil
-		})
-		if err != nil {
-			logReferral("credit return", order.ID, err)
+
+	if (order.Trial && order.ReferredBy != "" && order.Delivery == "archived") ||
+		(order.CreditPages > 0 && !order.CreditReturned && order.creditReleased()) {
+		if err := s.pay.store.update(order.ID, func(*PayOrder) error { return nil }); err != nil {
+			logReferral("settlement", order.ID, err)
 		}
 	}
 }

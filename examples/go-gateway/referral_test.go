@@ -76,9 +76,9 @@ func TestReferralRewardsDeliveredTrialsAndPaysForStandardPages(t *testing.T) {
 	}
 
 	// Credit only covers standard translation; a fully covered order needs no payment.
-	s.pay.referrals.mu.Lock()
-	s.pay.referrals.users["inviter"].Credit = 15
-	s.pay.referrals.mu.Unlock()
+	if _, err := s.pay.referrals.db.Exec("UPDATE referral_users SET credit=15 WHERE openid='inviter'"); err != nil {
+		t.Fatal(err)
+	}
 	free := order("inviter", map[string]any{"engine": "Bing"})
 	if free["payData"] != nil || free["order"].(map[string]any)["state"] != "paid" ||
 		free["order"].(map[string]any)["credit_pages"].(float64) != 12 || free["order"].(map[string]any)["total_fen"].(float64) != 0 {
@@ -102,6 +102,9 @@ func TestReferralRewardsDeliveredTrialsAndPaysForStandardPages(t *testing.T) {
 	}
 	// Reopening the store keeps codes and balances.
 	reopened, err := openReferralStore(s.pay.store.dir)
+	if err == nil {
+		defer reopened.db.Close()
+	}
 	if err != nil || reopened.credit("inviter") != 3 || reopened.inviter(view.Code, "someone") != "inviter" {
 		t.Fatal("referrals not persisted", err)
 	}
@@ -143,38 +146,40 @@ func TestReferralReturnSurvivesWriteFailuresAndRestart(t *testing.T) {
 	if _, err := s.pay.referrals.reserve("owner", 3); err != nil {
 		t.Fatal(err)
 	}
-	order := PayOrder{ID: "return-credit", OpenID: "owner", State: "closed", PaymentClosed: true, CreditPages: 3}
+	order := PayOrder{ID: "return-credit", OpenID: "owner", State: "pending", CreditPages: 3}
 	if err := s.pay.store.add(order); err != nil {
 		t.Fatal(err)
 	}
-	ledgerPath := s.pay.referrals.path
-	s.pay.referrals.path = t.TempDir() + "/missing/referrals.json"
-	s.settleReferrals(order)
+	// Abort after ledger mutations, while writing the order: all must roll back.
+	if _, err := s.pay.store.db.Exec(`CREATE TRIGGER fail_order BEFORE UPDATE ON orders BEGIN SELECT RAISE(ABORT,'injected order failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err := s.pay.store.update(order.ID, func(o *PayOrder) error { o.State = "closed"; o.PaymentClosed = true; return nil })
 	current, _ := s.pay.store.get(order.ID)
-	if current.CreditReturned || s.pay.referrals.credit("owner") != 2 {
-		t.Fatal("failed ledger write was not rolled back", current)
+	if err == nil || current.State != "pending" || current.CreditReturned || s.pay.referrals.credit("owner") != 2 {
+		t.Fatal("transaction not rolled back", err, current)
 	}
-	s.pay.referrals.path = ledgerPath
-	// The ledger succeeds but the order flag fails; the next process must not double-credit.
+	if _, err := s.pay.store.db.Exec("DROP TRIGGER fail_order"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pay.store.update(order.ID, func(o *PayOrder) error { o.State = "closed"; o.PaymentClosed = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	storeDir := s.pay.store.dir
-	s.pay.store.dir = t.TempDir() + "/missing"
-	s.settleReferrals(order)
-	current, _ = s.pay.store.get(order.ID)
-	if current.CreditReturned || s.pay.referrals.credit("owner") != 5 {
-		t.Fatal("unexpected partial write", current)
-	}
-	s.pay.store.dir = storeDir
-	var err error
-	s.pay.referrals, err = openReferralStore(storeDir)
+	s.pay.store.db.Close()
+	s.pay.store, err = openOrderStore(storeDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { s.pay.store.db.Close() })
+	s.pay.referrals = &ReferralStore{db: s.pay.store.db}
 	s.settleReferrals(current)
 	s.settleReferrals(current)
 	current, _ = s.pay.store.get(order.ID)
 	if !current.CreditReturned || s.pay.referrals.credit("owner") != 5 {
 		t.Fatal("restart replay lost or duplicated credit", current)
 	}
+
 	if err := s.grantOrder(order.ID, queriedOrder{ID: order.ID, EnvType: 1, Status: 2, WxID: "closed-wx"}); err == nil {
 		t.Fatal("terminal closed order revived after credit return")
 	}

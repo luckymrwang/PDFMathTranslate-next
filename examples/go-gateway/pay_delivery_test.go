@@ -68,10 +68,16 @@ func TestPaidResultSurvivesWorkerLoss(t *testing.T) {
 	}
 	python.Close()
 
+	if err := s.pay.store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reloaded, err := openOrderStore(s.pay.store.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { reloaded.db.Close() })
+	s.pay.store = reloaded
+	s.pay.referrals = &ReferralStore{db: reloaded.db}
 	done, _ := reloaded.get(order.ID)
 	if done.Delivery != "archived" || done.MonoFile == "" || done.DualFile != "" {
 		t.Fatalf("result not durably archived: %+v", done)

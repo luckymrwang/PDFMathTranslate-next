@@ -71,10 +71,14 @@ async function run() {
   page.unloaded = false
   page.fileRevision = 1
   page.data.filePath = 'first.pdf'
+  page.data.paying = false
+  let aborted = 0
   let uploads = 0, complete
   api.preparePdf = () => {
     uploads++
-    return new Promise(resolve => { complete = resolve })
+    const request = new Promise(resolve => { complete = resolve })
+    request.abort = () => { aborted++ }
+    return request
   }
   const first = page.prepareSelectedFile()
   const again = page.prepareSelectedFile()
@@ -86,7 +90,12 @@ async function run() {
   page.data.filePath = 'second.pdf'
   page.fileRevision++
   const stale = page.prepareSelectedFile()
+  page.data.countingPages = true
+  page.data.paymentSheet = true
   page.removeFile()
+  assert.equal(aborted, 1, "Removing a file aborts its upload")
+  assert.equal(page.data.countingPages, false)
+  assert.equal(page.data.paymentSheet, false)
   complete({ file_token: 'stale', page_count: 99, expires_at: Date.now() / 1000 + 1800 })
   await assert.rejects(stale, /文件已变更/)
   assert.equal(page.preparedFile, null, 'Removed file must not return from an old request')

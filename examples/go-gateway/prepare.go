@@ -358,10 +358,7 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		order := PayOrder{ID: id, OpenID: owner, Pages: pages, DocumentPages: file.Pages, Engine: input.Engine,
 			LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 			Name: file.Name, State: "paid", Provided: true, Trial: true, CreatedAt: time.Now().Unix(), Attach: id}
-		if input.Ref != "" && !s.pay.store.hasOrders(owner) {
-			order.ReferredBy = s.pay.referrals.inviter(input.Ref, owner)
-		}
-		if err := s.pay.store.addTrial(order); err != nil {
+		if err := s.pay.store.addInvitedTrial(order, input.Ref); err != nil {
 			if errors.Is(err, errTrialUsed) {
 				writeError(w, 409, "免费试用已使用过")
 			} else {
@@ -386,64 +383,45 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		}
 		billed -= credit
 	}
-	// Referral pages cover standard translation only and are held by the order until it settles.
-	referralPages := 0
-	if standardEngine(input.Engine) {
-		if referralPages, err = s.pay.referrals.reserve(owner, billed); err != nil {
-			writeError(w, 500, "订单保存失败")
-			return
-		}
-		billed -= referralPages
-	}
-	defer func() {
-		if referralPages > 0 && !saved {
-			_ = s.pay.referrals.restore(owner, referralPages)
-		}
-	}()
-	if billed == 0 {
-		// Fully covered by referral pages: a paid order that never touches WeChat payment.
-		id, err := newTradeNo()
-		if err != nil {
-			writeError(w, 500, "无法创建订单")
-			return
-		}
-		product, unit := s.pay.cfg.productFor(input.Engine)
-		order := PayOrder{ID: id, OpenID: owner, ProductID: product, UnitPrice: unit, Pages: file.Pages,
-			Engine: input.Engine, LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path,
-			FileHash: file.Hash, Name: file.Name, State: "paid", Provided: true, CreatedAt: time.Now().Unix(),
-			Attach: id, UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, CreditPages: referralPages}
-		if err := s.pay.store.add(order); err != nil {
-			writeError(w, 500, "订单保存失败")
-			return
-		}
-		saved = true
-		writeJSON(w, 200, map[string]any{"order": orderView(order)})
-		return
-	}
-	// The client platform only decides rounding up; claiming iOS can never lower the price.
-	product, unit, quantity, total := s.pay.cfg.orderAmounts(input.Engine, billed, input.Platform == "ios")
-	if total > 10000000 {
-		writeError(w, 400, "订单金额超过限额")
-		return
-	}
 	id, err := newTradeNo()
 	if err != nil {
 		writeError(w, 500, "无法创建订单")
 		return
 	}
-	order := PayOrder{ID: id, OpenID: owner, ProductID: product, UnitPrice: unit,
-		Pages: file.Pages, Quantity: quantity, Total: total, Engine: input.Engine,
-		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path,
-		FileHash: file.Hash, Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
-		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, CreditPages: referralPages}
-	signData, _ := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID,
-		"buyQuantity": order.Quantity, "env": 0, "currencyType": "CNY",
-		"productId": order.ProductID, "goodsPrice": order.UnitPrice, "outTradeNo": id, "attach": id})
-	order.SignData = string(signData)
-	if err := s.pay.store.add(order); err != nil {
+	order := PayOrder{ID: id, OpenID: owner, Pages: file.Pages, Engine: input.Engine,
+		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
+		Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
+		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit}
+	err = s.pay.store.addPurchase(&order, billed, func(o *PayOrder, remaining int) error {
+		if remaining == 0 {
+			o.ProductID, o.UnitPrice = s.pay.cfg.productFor(o.Engine)
+			o.State, o.Provided = "paid", true
+			return nil
+		}
+		o.ProductID, o.UnitPrice, o.Quantity, o.Total = s.pay.cfg.orderAmounts(o.Engine, remaining, input.Platform == "ios")
+		if o.Total > 10000000 {
+			return errOrderAmountLimit
+		}
+		signData, err := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID,
+			"buyQuantity": o.Quantity, "env": 0, "currencyType": "CNY", "productId": o.ProductID,
+			"goodsPrice": o.UnitPrice, "outTradeNo": id, "attach": id})
+		o.SignData = string(signData)
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, errOrderAmountLimit) {
+			writeError(w, 400, "订单金额超过限额")
+			return
+		}
 		writeError(w, 500, "订单保存失败")
 		return
 	}
 	saved = true
+	if order.Total == 0 {
+		writeJSON(w, 200, map[string]any{"order": orderView(order)})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"order": orderView(order), "payData": paymentData(order, s.pay.cfg.AppKey, session)})
 }
+
+var errOrderAmountLimit = errors.New("订单金额超过限额")

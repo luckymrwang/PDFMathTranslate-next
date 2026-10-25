@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1
 # Build context: examples/go-gateway/ (see .dockerignore — .env, the prebuilt
 # binary and test files never enter the context).
-# go.mod has zero dependencies, so the build needs no module download.
+# SQLite uses a pure Go driver; the runtime needs no database server or CGO.
 
 FROM golang:1.24-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY *.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/go-gateway .
 

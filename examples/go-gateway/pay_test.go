@@ -14,8 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,10 +40,8 @@ func testPayServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	referrals, err := openReferralStore(store.dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { store.db.Close() })
+	referrals := &ReferralStore{db: store.db}
 	return &Server{cfg: &Config{AppID: defaultAppID}, tasks: newTaskRegistry(),
 		pay: &PayService{cfg: &PayConfig{Enabled: true, OfferID: "offer", AppKey: "app-key",
 			NotifyToken: "notify-token", AESKey: strings.TrimRight(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), "="),
@@ -157,10 +153,16 @@ func TestServerPricingPaymentGateAndRestart(t *testing.T) {
 	if submissions.Load() != 1 {
 		t.Fatal("duplicate translation submission")
 	}
+	if err := s.pay.store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reloaded, err := openOrderStore(s.pay.store.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { reloaded.db.Close() })
+	s.pay.store = reloaded
+	s.pay.referrals = &ReferralStore{db: reloaded.db}
 	order, ok := reloaded.get(id)
 	if !ok || order.State != "submitted" || order.WxOrderID != "wx-1" || order.TaskID != "task-1" {
 		t.Fatal("order not durable")
@@ -260,11 +262,7 @@ func TestEncryptedPushAuthentication(t *testing.T) {
 func TestOrderWriteFailureDoesNotGrant(t *testing.T) {
 	s := testPayServer(t)
 	_ = s.pay.store.add(PayOrder{ID: "T12345678", State: "pending", Total: 50})
-	dir := filepath.Join(s.pay.store.dir, "orders")
-	if err := os.Rename(dir, dir+"-saved"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dir, []byte("not a directory"), 0600); err != nil {
+	if _, err := s.pay.store.db.Exec(`CREATE TRIGGER fail_order BEFORE UPDATE ON orders BEGIN SELECT RAISE(ABORT,'injected write failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	err := s.grantOrder("T12345678", queriedOrder{ID: "T12345678", WxID: "wx-1", Status: 2, EnvType: 1, OrderFee: 50, PaidFee: 50})

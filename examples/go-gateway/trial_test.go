@@ -299,10 +299,16 @@ func TestTrialCreditReservationIsAtomicAndSurvivesRestart(t *testing.T) {
 	if err := s.pay.store.update(first.ID, func(o *PayOrder) error { o.State = "closed"; return nil }); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.pay.store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := openOrderStore(s.pay.store.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { reopened.db.Close() })
+	s.pay.store = reopened
+	s.pay.referrals = &ReferralStore{db: reopened.db}
 	if _, ok := reopened.trialCredit(trial.ID, "owner", "hash"); ok {
 		t.Fatal("local cancellation released trial credit")
 	}

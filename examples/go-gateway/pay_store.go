@@ -2,12 +2,12 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -157,72 +157,58 @@ type OrderStore struct {
 	mu     sync.Mutex
 	dir    string
 	orders map[string]PayOrder
+	db     *sql.DB
 }
 
 func openOrderStore(dir string) (*OrderStore, error) {
-	for _, path := range []string{dir, filepath.Join(dir, "orders"), filepath.Join(dir, "uploads"), filepath.Join(dir, "results")} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			return nil, err
-		}
-	}
-	store := &OrderStore{dir: dir, orders: make(map[string]PayOrder)}
-	files, err := filepath.Glob(filepath.Join(dir, "orders", "*.json"))
+	db, err := openDatabase(dir)
 	if err != nil {
 		return nil, err
 	}
-	wxIDs := make(map[string]string)
-	for _, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
+	store := &OrderStore{dir: dir, db: db, orders: make(map[string]PayOrder)}
+	rows, err := db.Query("SELECT record FROM orders")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			db.Close()
 			return nil, err
 		}
 		var order PayOrder
 		if err := json.Unmarshal(data, &order); err != nil {
-			return nil, fmt.Errorf("invalid order file: %s", filepath.Base(path))
-		}
-		if order.ID == "" || order.ID+".json" != filepath.Base(path) {
-			return nil, errors.New("invalid order identity")
-		}
-		if order.WxOrderID != "" {
-			if previous, ok := wxIDs[order.WxOrderID]; ok && previous != order.ID {
-				return nil, errors.New("duplicate platform order id")
-			}
-			wxIDs[order.WxOrderID] = order.ID
+			db.Close()
+			return nil, err
 		}
 		store.orders[order.ID] = order
+	}
+	if err := rows.Err(); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return store, nil
 }
 
-// One gateway process owns this directory; never share it across instances.
+// The mutex serializes callbacks; publish the in-memory snapshot only after commit.
 func (s *OrderStore) saveLocked(order PayOrder) error {
-	tmp, err := os.CreateTemp(filepath.Join(s.dir, "orders"), ".order-*")
+	tx, err := beginDatabaseTx(s.db)
 	if err != nil {
 		return err
 	}
-	path := tmp.Name()
-	defer os.Remove(path)
-	defer tmp.Close()
-	if err := tmp.Chmod(0600); err != nil {
+	defer tx.Rollback()
+	if err := settleOrderTx(tx, &order); err != nil {
 		return err
 	}
-	if err := json.NewEncoder(tmp).Encode(order); err != nil {
+	if err := writeOrder(tx, order); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(path, filepath.Join(s.dir, "orders", order.ID+".json")); err != nil {
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.orders[order.ID] = order
-	if dir, err := os.Open(filepath.Join(s.dir, "orders")); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
 	return nil
 }
 
@@ -240,6 +226,53 @@ func (s *OrderStore) add(order PayOrder) error {
 		}
 	}
 	return s.saveLocked(order)
+}
+
+// addPurchase reserves referral pages and inserts the priced order atomically.
+func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrder, int) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.orders[order.ID]; exists {
+		return errors.New("duplicate order")
+	}
+	if order.UpgradeFrom != "" && order.TrialCredit > 0 {
+		for _, existing := range s.orders {
+			if existing.UpgradeFrom == order.UpgradeFrom && existing.TrialCredit > 0 && !existing.creditReleased() {
+				return errors.New("trial credit already reserved")
+			}
+		}
+	}
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	candidate := *order
+	if standardEngine(candidate.Engine) {
+		var balance int
+		err := tx.QueryRow("SELECT credit FROM referral_users WHERE openid=?", candidate.OpenID).Scan(&balance)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		candidate.CreditPages = min(balance, billed)
+		if candidate.CreditPages > 0 {
+			if _, err := tx.Exec("UPDATE referral_users SET credit=credit-? WHERE openid=?", candidate.CreditPages, candidate.OpenID); err != nil {
+				return err
+			}
+		}
+	}
+	if err := price(&candidate, billed-candidate.CreditPages); err != nil {
+		return err
+	}
+	if err := writeOrder(tx, candidate); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	*order = candidate
+	s.orders[order.ID] = candidate
+	return nil
 }
 
 // creditReleased excludes local cancellation: those orders can still be paid late.
@@ -266,6 +299,10 @@ func (s *OrderStore) hasTrial(owner string) bool {
 
 // addTrial atomically enforces one free trial per user.
 func (s *OrderStore) addTrial(order PayOrder) error {
+	return s.addInvitedTrial(order, "")
+}
+
+func (s *OrderStore) addInvitedTrial(order PayOrder, code string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, existing := range s.orders {
@@ -276,7 +313,34 @@ func (s *OrderStore) addTrial(order PayOrder) error {
 	if _, ok := s.orders[order.ID]; ok {
 		return errors.New("duplicate order")
 	}
-	return s.saveLocked(order)
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if code != "" {
+		newUser := true
+		for _, existing := range s.orders {
+			if existing.OpenID == order.OpenID {
+				newUser = false
+				break
+			}
+		}
+		if newUser {
+			err := tx.QueryRow("SELECT openid FROM referral_users WHERE code=? AND openid<>?", code, order.OpenID).Scan(&order.ReferredBy)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+	}
+	if err := writeOrder(tx, order); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.orders[order.ID] = order
+	return nil
 }
 
 var errTrialUsed = errors.New("trial already used")
@@ -317,6 +381,7 @@ func (s *OrderStore) get(id string) (PayOrder, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	order, ok := s.orders[id]
+	order.TaskHistory = append([]string(nil), order.TaskHistory...)
 	return order, ok
 }
 
@@ -325,6 +390,7 @@ func (s *OrderStore) all() []PayOrder {
 	defer s.mu.Unlock()
 	out := make([]PayOrder, 0, len(s.orders))
 	for _, order := range s.orders {
+		order.TaskHistory = append([]string(nil), order.TaskHistory...)
 		out = append(out, order)
 	}
 	return out
@@ -352,6 +418,7 @@ func (s *OrderStore) update(id string, change func(*PayOrder) error) error {
 	if !ok {
 		return errors.New("order not found")
 	}
+	order.TaskHistory = append([]string(nil), order.TaskHistory...)
 	if err := change(&order); err != nil {
 		return err
 	}

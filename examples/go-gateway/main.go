@@ -46,10 +46,8 @@ func main() {
 		if err := cleanupPreparedFiles(filepath.Join(store.dir, "uploads")); err != nil {
 			log.Fatalf("preparation cleanup error: %v", err)
 		}
-		referrals, err := openReferralStore(payConfig.Dir)
-		if err != nil {
-			log.Fatalf("referral storage error: %v", err)
-		}
+		defer store.db.Close()
+		referrals := &ReferralStore{db: store.db}
 		srv.pay = &PayService{cfg: payConfig, store: store, client: newXPayClient(cfg, payConfig),
 			sessions: &paySessions{keys: make(map[string]paySession)}, referrals: referrals}
 		for _, order := range store.all() {

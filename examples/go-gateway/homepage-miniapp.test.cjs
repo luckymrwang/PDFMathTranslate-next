@@ -16,6 +16,7 @@ async function run() {
   let orders = [], freeOrders = false
   const api = {
     getPayConfig: async () => config,
+    getReferral: async () => ({ code: 'MINE2345', reward_pages: 5 }),
     createPreparedOrder: async (token, data) => {
       created.push({ token, data })
       if (data.trial) return { order: { id: 'trial-1', engine: 'Bing', pages: 3 } }
@@ -96,6 +97,15 @@ async function run() {
 
   const preview = load('pages/preview/preview.js')
   preview.onLoad()
+  await preview.loadInvitation()
+  // onLoad already started loading; let the shared request finish.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(preview.data.inviteCode, 'MINE2345')
+  assert.equal(preview.data.rewardPages, 5)
+  const resultShare = preview.onShareAppMessage()
+  assert.equal(resultShare.path, '/pages/index/index?ref=MINE2345')
+  assert.equal(resultShare.imageUrl, '/assets/share-card.jpg')
+  assert.ok(!JSON.stringify(resultShare).includes(app.globalData.translation.name), 'Share must not expose the document name')
   await preview.loadUpgrade()
   assert.equal(preview.data.trial, true)
   assert.equal(preview.data.remainingPages, 9)
