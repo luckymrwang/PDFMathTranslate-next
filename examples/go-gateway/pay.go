@@ -415,6 +415,7 @@ func (s *Server) grantOrder(id string, verified queriedOrder) error {
 		// An unpaid closed order need not have a platform payment number.
 		if verified.Status == 6 && (order.State == "pending" || order.State == "closed") {
 			order.State = "closed"
+			order.PaymentClosed = true
 			return nil
 		}
 		if verified.WxID == "" {
@@ -434,8 +435,8 @@ func (s *Server) grantOrder(id string, verified queriedOrder) error {
 		if verified.OrderFee != order.Total || verified.PaidFee != order.Total {
 			return errors.New("payment amount mismatch")
 		}
-		if order.State == "refunded" {
-			return errors.New("refunded order cannot be fulfilled")
+		if order.State == "refunded" || order.PaymentClosed || order.CreditReturned {
+			return errors.New("released order cannot be fulfilled")
 		}
 		order.WxOrderID = verified.WxID
 		// A locally closed order the platform reports as paid was paid late; honour it.
@@ -464,6 +465,7 @@ func (s *Server) closePendingOrder(ctx context.Context, id string) error {
 	return s.pay.store.update(id, func(current *PayOrder) error {
 		if current.State == "pending" {
 			current.State = "closed"
+			current.PaymentClosed = err == nil && verified.Status == 6 && verified.ID == current.ID && verified.EnvType == 1
 		}
 		return nil
 	})
@@ -634,6 +636,14 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 					cancel()
 					unlock()
 				}
+			}
+			if queryWeChat && order.State == "closed" && !order.PaymentClosed && order.Total > 0 {
+				checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				if err := s.reconcileOrder(checkCtx, order.ID); err != nil {
+					log.Printf("closed order reconcile failed (order=%s): %v", order.ID, err)
+				}
+				cancel()
+				order, _ = s.pay.store.get(order.ID)
 			}
 			if order.Delivery != "" || order.State == "closed" || order.State == "refunded" {
 				cleanCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

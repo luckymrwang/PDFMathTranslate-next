@@ -92,7 +92,7 @@ func TestReferralRewardsDeliveredTrialsAndPaysForStandardPages(t *testing.T) {
 		t.Fatal("credit not reserved", s.pay.referrals.credit("inviter"))
 	}
 	// An unpaid order gives its pages back exactly once.
-	s.pay.store.update(partial["id"].(string), func(o *PayOrder) error { o.State = "closed"; return nil })
+	s.pay.store.update(partial["id"].(string), func(o *PayOrder) error { o.State, o.PaymentClosed = "closed", true; return nil })
 	for i := 0; i < 2; i++ {
 		current, _ := s.pay.store.get(partial["id"].(string))
 		s.settleReferrals(current)
@@ -104,5 +104,99 @@ func TestReferralRewardsDeliveredTrialsAndPaysForStandardPages(t *testing.T) {
 	reopened, err := openReferralStore(s.pay.store.dir)
 	if err != nil || reopened.credit("inviter") != 3 || reopened.inviter(view.Code, "someone") != "inviter" {
 		t.Fatal("referrals not persisted", err)
+	}
+}
+
+func TestReferralLocalCancellationKeepsCreditForLatePayment(t *testing.T) {
+	s := testPayServer(t)
+	if _, err := s.pay.referrals.view("owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pay.referrals.restore("owner", 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pay.referrals.reserve("owner", 3); err != nil {
+		t.Fatal(err)
+	}
+	order := PayOrder{ID: "late-credit", OpenID: "owner", State: "closed", CreditPages: 3, Total: 90}
+	if err := s.pay.store.add(order); err != nil {
+		t.Fatal(err)
+	}
+	s.settleReferrals(order)
+	if got := s.pay.referrals.credit("owner"); got != 2 {
+		t.Fatal("local cancellation released spendable credit", got)
+	}
+	if err := s.grantOrder(order.ID, queriedOrder{ID: order.ID, EnvType: 1, Status: 2, WxID: "late-wx", OrderFee: 90, PaidFee: 90}); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := s.pay.store.get(order.ID)
+	if current.State != "paid" || current.CreditReturned {
+		t.Fatal(current)
+	}
+}
+
+func TestReferralReturnSurvivesWriteFailuresAndRestart(t *testing.T) {
+	s := testPayServer(t)
+	if err := s.pay.referrals.restore("owner", 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pay.referrals.reserve("owner", 3); err != nil {
+		t.Fatal(err)
+	}
+	order := PayOrder{ID: "return-credit", OpenID: "owner", State: "closed", PaymentClosed: true, CreditPages: 3}
+	if err := s.pay.store.add(order); err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := s.pay.referrals.path
+	s.pay.referrals.path = t.TempDir() + "/missing/referrals.json"
+	s.settleReferrals(order)
+	current, _ := s.pay.store.get(order.ID)
+	if current.CreditReturned || s.pay.referrals.credit("owner") != 2 {
+		t.Fatal("failed ledger write was not rolled back", current)
+	}
+	s.pay.referrals.path = ledgerPath
+	// The ledger succeeds but the order flag fails; the next process must not double-credit.
+	storeDir := s.pay.store.dir
+	s.pay.store.dir = t.TempDir() + "/missing"
+	s.settleReferrals(order)
+	current, _ = s.pay.store.get(order.ID)
+	if current.CreditReturned || s.pay.referrals.credit("owner") != 5 {
+		t.Fatal("unexpected partial write", current)
+	}
+	s.pay.store.dir = storeDir
+	var err error
+	s.pay.referrals, err = openReferralStore(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.settleReferrals(current)
+	s.settleReferrals(current)
+	current, _ = s.pay.store.get(order.ID)
+	if !current.CreditReturned || s.pay.referrals.credit("owner") != 5 {
+		t.Fatal("restart replay lost or duplicated credit", current)
+	}
+	if err := s.grantOrder(order.ID, queriedOrder{ID: order.ID, EnvType: 1, Status: 2, WxID: "closed-wx"}); err == nil {
+		t.Fatal("terminal closed order revived after credit return")
+	}
+}
+
+func TestReferralConfirmedClosureAndRefundReturnOnce(t *testing.T) {
+	for _, status := range []int{6, 5, 8} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			s := testPayServer(t)
+			order := PayOrder{ID: "terminal", OpenID: "owner", State: "pending", CreditPages: 3}
+			if err := s.pay.store.add(order); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.grantOrder(order.ID, queriedOrder{ID: order.ID, EnvType: 1, Status: status, WxID: "terminal-wx"}); err != nil {
+				t.Fatal(err)
+			}
+			current, _ := s.pay.store.get(order.ID)
+			s.settleReferrals(current)
+			s.settleReferrals(current)
+			if got := s.pay.referrals.credit("owner"); got != 3 {
+				t.Fatal(got)
+			}
+		})
 	}
 }

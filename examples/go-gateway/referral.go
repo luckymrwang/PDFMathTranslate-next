@@ -19,8 +19,9 @@ const referralRewardPages = 5
 type referralUser struct {
 	Code string `json:"code"`
 	// Credit is the unspent page balance; pages reserved by open orders are not in it.
-	Credit   int      `json:"credit"`
-	Rewarded []string `json:"rewarded"`
+	Credit   int             `json:"credit"`
+	Rewarded []string        `json:"rewarded"`
+	Returned map[string]bool `json:"returned,omitempty"`
 }
 
 // ReferralStore keeps invite codes and page credits in one JSON file next to the orders.
@@ -177,7 +178,36 @@ func (s *ReferralStore) restore(openid string, pages int) error {
 		return err
 	}
 	user.Credit += pages
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		user.Credit -= pages
+		return err
+	}
+	return nil
+}
+
+// returnOrder persists the balance and its idempotency key in the same file.
+// If saving the order flag fails afterwards, replaying this entry is harmless.
+func (s *ReferralStore) returnOrder(openid, orderID string, pages int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, err := s.userLocked(openid)
+	if err != nil {
+		return err
+	}
+	if user.Returned[orderID] {
+		return nil
+	}
+	if user.Returned == nil {
+		user.Returned = make(map[string]bool)
+	}
+	user.Returned[orderID] = true
+	user.Credit += pages
+	if err := s.saveLocked(); err != nil {
+		delete(user.Returned, orderID)
+		user.Credit -= pages
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleReferral(w http.ResponseWriter, r *http.Request) {
@@ -207,18 +237,18 @@ func (s *Server) settleReferrals(order PayOrder) {
 			logReferral("reward", order.ID, err)
 		}
 	}
-	if order.CreditPages > 0 && !order.CreditReturned && (order.State == "closed" || order.State == "refunded") {
-		var pages int
+	if order.CreditPages > 0 && !order.CreditReturned && order.creditReleased() {
+		// Hold the order lock through the ledger write so payment cannot race a return.
 		err := s.pay.store.update(order.ID, func(current *PayOrder) error {
-			if current.CreditReturned || (current.State != "closed" && current.State != "refunded") {
+			if current.CreditReturned || !current.creditReleased() {
 				return nil
 			}
-			current.CreditReturned, pages = true, current.CreditPages
+			if err := s.pay.referrals.returnOrder(current.OpenID, current.ID, current.CreditPages); err != nil {
+				return err
+			}
+			current.CreditReturned = true
 			return nil
 		})
-		if err == nil && pages > 0 {
-			err = s.pay.referrals.restore(order.OpenID, pages)
-		}
 		if err != nil {
 			logReferral("credit return", order.ID, err)
 		}

@@ -131,6 +131,8 @@ type PayOrder struct {
 	ReferredBy     string
 	CreditPages    int
 	CreditReturned bool
+	// PaymentClosed records a platform-confirmed terminal unpaid order.
+	PaymentClosed bool
 	// Trial orders are free and never touch WeChat payment.
 	Trial                bool
 	CreatedAt, LastQuery int64
@@ -230,7 +232,19 @@ func (s *OrderStore) add(order PayOrder) error {
 	if _, ok := s.orders[order.ID]; ok {
 		return errors.New("duplicate order")
 	}
+	if order.UpgradeFrom != "" && order.TrialCredit > 0 {
+		for _, existing := range s.orders {
+			if existing.UpgradeFrom == order.UpgradeFrom && existing.TrialCredit > 0 && !existing.creditReleased() {
+				return errors.New("trial credit already reserved")
+			}
+		}
+	}
 	return s.saveLocked(order)
+}
+
+// creditReleased excludes local cancellation: those orders can still be paid late.
+func (o PayOrder) creditReleased() bool {
+	return o.State == "refunded" || (o.State == "closed" && o.PaymentClosed)
 }
 
 // trialUnlimited lifts the one-trial-per-user limit for testing (TRIAL_UNLIMITED=true).
@@ -283,7 +297,7 @@ func (s *OrderStore) hasOrders(owner string) bool {
 }
 
 // trialCredit returns how many already-translated trial pages an upgrade of the same
-// file may leave unpaid. Each trial is credited once: a paid or delivered upgrade uses it up.
+// file may leave unpaid. Each trial is credited once: pending and locally cancelled upgrades keep their reservation.
 func (s *OrderStore) trialCredit(trialID, owner, fileHash string) (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -292,7 +306,7 @@ func (s *OrderStore) trialCredit(trialID, owner, fileHash string) (int, bool) {
 		return 0, false
 	}
 	for _, order := range s.orders {
-		if order.UpgradeFrom == trialID && (order.State == "paid" || order.State == "submitted") {
+		if order.UpgradeFrom == trialID && order.TrialCredit > 0 && !order.creditReleased() {
 			return 0, false
 		}
 	}
@@ -340,6 +354,15 @@ func (s *OrderStore) update(id string, change func(*PayOrder) error) error {
 	}
 	if err := change(&order); err != nil {
 		return err
+	}
+	// Also protect orders written by older versions before reservations were enforced.
+	if order.TrialCredit > 0 && order.UpgradeFrom != "" && (order.State == "paid" || order.State == "submitted") {
+		for otherID, other := range s.orders {
+			if otherID != id && other.UpgradeFrom == order.UpgradeFrom && other.TrialCredit > 0 &&
+				(other.State == "paid" || other.State == "submitted") {
+				return errors.New("trial credit already consumed")
+			}
+		}
 	}
 	if order.WxOrderID != "" {
 		for otherID, other := range s.orders {

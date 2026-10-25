@@ -266,10 +266,76 @@ func TestTrialUpgradeChargesOnlyUntranslatedPagesOnce(t *testing.T) {
 		created.Order["total_fen"].(float64) != 90 || created.Order["trial_credit_pages"].(float64) != 3 {
 		t.Fatal("unexpected upgrade order", got.Body.String())
 	}
+	if again := upgrade("owner", hash); again.Code != 409 {
+		t.Fatal("pending upgrade did not reserve trial credit", again.Code)
+	}
 	if err := s.pay.store.update(created.Order["id"].(string), func(o *PayOrder) error { o.State = "paid"; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if again := upgrade("owner", hash); again.Code != 409 {
 		t.Fatal("trial credited twice", again.Code)
+	}
+}
+
+func TestTrialCreditReservationIsAtomicAndSurvivesRestart(t *testing.T) {
+	s := testPayServer(t)
+	trial := PayOrder{ID: "trial-reserve", OpenID: "owner", Trial: true, Pages: 3, FileHash: "hash", State: "submitted"}
+	if err := s.pay.store.add(trial); err != nil {
+		t.Fatal(err)
+	}
+	first := PayOrder{ID: "upgrade-a", OpenID: "owner", UpgradeFrom: trial.ID, TrialCredit: 3, State: "pending"}
+	second := first
+	second.ID = "upgrade-b"
+	// Both callers can have obtained a quote; add must still enforce uniqueness.
+	if _, ok := s.pay.store.trialCredit(trial.ID, "owner", "hash"); !ok {
+		t.Fatal("missing credit")
+	}
+	if err := s.pay.store.add(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pay.store.add(second); err == nil {
+		t.Fatal("second pending reservation accepted")
+	}
+	if err := s.pay.store.update(first.ID, func(o *PayOrder) error { o.State = "closed"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openOrderStore(s.pay.store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.trialCredit(trial.ID, "owner", "hash"); ok {
+		t.Fatal("local cancellation released trial credit")
+	}
+	if err := reopened.update(first.ID, func(o *PayOrder) error { o.PaymentClosed = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.trialCredit(trial.ID, "owner", "hash"); !ok {
+		t.Fatal("confirmed closure did not release reservation")
+	}
+	if err := reopened.add(second); err != nil {
+		t.Fatal(err)
+	}
+	s.pay.store = reopened
+	if err := s.grantOrder(first.ID, queriedOrder{ID: first.ID, EnvType: 1, Status: 2, WxID: "late-upgrade"}); err == nil {
+		t.Fatal("old upgrade revived after reservation was released")
+	}
+}
+
+func TestLegacyPendingUpgradesCannotBothConsumeTrialCredit(t *testing.T) {
+	s := testPayServer(t)
+	// Simulate two pending records persisted before unique reservations existed.
+	for _, id := range []string{"legacy-a", "legacy-b"} {
+		if err := s.pay.store.saveLocked(PayOrder{ID: id, OpenID: "owner", UpgradeFrom: "trial", TrialCredit: 3, State: "pending", Total: 90}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, id := range []string{"legacy-a", "legacy-b"} {
+		err := s.grantOrder(id, queriedOrder{ID: id, EnvType: 1, Status: 2, WxID: "wx-" + id, OrderFee: 90, PaidFee: 90})
+		if i == 0 && err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 && err == nil {
+			t.Fatal("legacy trial credit consumed twice")
+		}
 	}
 }
