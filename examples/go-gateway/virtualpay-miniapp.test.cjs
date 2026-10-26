@@ -21,8 +21,16 @@ async function run() {
   assert.equal(captured.signData, payData.signData)
   wx.getAppBaseInfo = () => ({ version: '8.0.67' })
   assert.throws(() => payment.assertPaymentSupported(), /8.0.68/)
+  for (const platform of ['mac', 'windows', 'linux']) {
+    wx.getDeviceInfo = () => ({ platform })
+    assert.throws(() => payment.assertPaymentSupported(), /手机微信/)
+  }
   wx.getDeviceInfo = () => ({ platform: 'android' })
   payment.assertPaymentSupported()
+  const originalPayment = wx.requestVirtualPayment
+  wx.requestVirtualPayment = data => data.fail({ errMsg: 'requestVirtualPayment:fail INVALID_PLATFORM' })
+  await assert.rejects(payment.pay(payData), error => /手机微信/.test(error.errMsg))
+  wx.requestVirtualPayment = originalPayment
   wx.canIUse = () => false
   assert.throws(() => payment.assertPaymentSupported(), /不支持/)
   assert.equal(payment.formatFen(160), '1.60')
