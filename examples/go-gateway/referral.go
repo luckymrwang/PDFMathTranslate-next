@@ -6,12 +6,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 )
-
-// An inviter earns referralRewardPages free standard-translation pages for each
-// invited new user whose free trial is delivered. There is no cap: every reward
-// needs a real new user's delivered trial, and the pages only cover cheap Bing/Google.
-const referralRewardPages = 5
 
 type referralUser struct {
 	Code string `json:"code"`
@@ -104,25 +100,6 @@ func (s *ReferralStore) inviter(code, invitee string) string {
 	return owner
 }
 
-func rewardTx(tx *databaseTx, inviter, invitee string) error {
-	if _, err := referralUserTx(tx, inviter); err != nil {
-		return err
-	}
-	result, err := tx.Exec("INSERT INTO referral_rewards(inviter,invitee) VALUES(?,?) ON CONFLICT(invitee) DO NOTHING", inviter, invitee)
-	if err != nil {
-		return err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return nil
-	}
-	_, err = tx.Exec("UPDATE referral_users SET credit=credit+? WHERE openid=?", referralRewardPages, inviter)
-	return err
-}
-
 func (s *ReferralStore) reserve(owner string, pages int) (int, error) {
 	tx, err := beginDatabaseTx(s.db)
 	if err != nil {
@@ -174,19 +151,17 @@ func returnOrderTx(tx *databaseTx, owner, orderID string, pages int) error {
 	if n == 0 {
 		return nil
 	}
+	if _, err = tx.Exec("INSERT INTO points_ledger(event_key,openid,delta,day,kind) VALUES(?,?,?,'','return')", "return:"+orderID, owner, pages); err != nil {
+		return err
+	}
 	_, err = tx.Exec("UPDATE referral_users SET credit=credit+? WHERE openid=?", pages, owner)
 	return err
 }
 
 // Settlement and the state that causes it are committed together.
 func settleOrderTx(tx *databaseTx, order *PayOrder) error {
-	if order.Trial && order.ReferredBy != "" && order.Delivery == "archived" {
-		if err := rewardTx(tx, order.ReferredBy, order.OpenID); err != nil {
-			return err
-		}
-	}
-	if order.CreditPages > 0 && !order.CreditReturned && order.creditReleased() {
-		if err := returnOrderTx(tx, order.OpenID, order.ID, order.CreditPages); err != nil {
+	if order.CreditPoints > 0 && !order.CreditReturned && order.creditReleased() {
+		if err := returnOrderTx(tx, order.OpenID, order.ID, order.CreditPoints); err != nil {
 			return err
 		}
 		order.CreditReturned = true
@@ -209,25 +184,17 @@ func (s *Server) handleReferral(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "邀请信息暂不可用")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"code": user.Code, "credit_pages": user.Credit, "invited": len(user.Rewarded),
-		"reward_pages": referralRewardPages})
+	wallet, err := s.pay.referrals.wallet(openid, time.Now())
+	if err != nil {
+		writeError(w, 500, "积分信息暂不可用")
+		return
+	}
+	wallet["code"], wallet["invited"] = user.Code, len(user.Rewarded)
+	writeJSON(w, 200, wallet)
 }
 
-// settleReferrals rewards inviters for delivered trials and returns credit held by
-// orders that ended unpaid or refunded. Both are idempotent and run on every sweep.
 func (s *Server) settleReferrals(order PayOrder) {
-	// Already rewarded deliveries need no further write. Failed reads are retried
-	// by the normal transaction instead of being mistaken for a settled trial.
-	if order.Trial && order.ReferredBy != "" && order.Delivery == "archived" {
-		var inviter string
-		err := s.pay.store.db.QueryRow("SELECT inviter FROM referral_rewards WHERE invitee=?", order.OpenID).Scan(&inviter)
-		if err == nil {
-			return
-		}
-	}
-
-	if (order.Trial && order.ReferredBy != "" && order.Delivery == "archived") ||
-		(order.CreditPages > 0 && !order.CreditReturned && order.creditReleased()) {
+	if order.CreditPoints > 0 && !order.CreditReturned && order.creditReleased() {
 		if err := s.pay.store.update(order.ID, func(*PayOrder) error { return nil }); err != nil {
 			logReferral("settlement", order.ID, err)
 		}
@@ -236,4 +203,153 @@ func (s *Server) settleReferrals(order PayOrder) {
 
 func logReferral(action, orderID string, err error) {
 	log.Printf("referral %s failed (order=%s): %v", action, orderID, err)
+}
+
+const pointsPerPage = 10
+const dailyPointsLimit = 500
+const pointsReward = 100
+
+var chinaTime = time.FixedZone("Asia/Shanghai", 8*60*60)
+
+func pointsDay(now time.Time) string { return now.In(chinaTime).Format("2006-01-02") }
+
+func migratePoints(tx *databaseTx) error {
+	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS points_logins(openid TEXT PRIMARY KEY, first_day TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS points_daily(openid TEXT NOT NULL,day TEXT NOT NULL,earned INTEGER NOT NULL DEFAULT 0,claimed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(openid,day));
+ CREATE TABLE IF NOT EXISTS points_ledger(event_key TEXT PRIMARY KEY,openid TEXT NOT NULL,delta INTEGER NOT NULL,day TEXT NOT NULL,kind TEXT NOT NULL);
+ UPDATE referral_users SET credit=credit*10;
+ INSERT INTO points_ledger(event_key,openid,delta,day,kind) SELECT 'migration:'||openid,openid,credit,'','migration' FROM referral_users;
+ INSERT OR IGNORE INTO points_logins SELECT openid,'' FROM referral_users;
+ INSERT OR IGNORE INTO points_logins SELECT openid,'' FROM orders WHERE openid<>'';
+ INSERT OR IGNORE INTO points_logins SELECT invitee,'' FROM referral_rewards;
+ INSERT OR IGNORE INTO points_logins SELECT json_extract(record,'$.ReferredBy'),'' FROM orders WHERE json_extract(record,'$.ReferredBy')<>'';
+ UPDATE orders SET record=json_set(record,'$.CreditPoints',coalesce(json_extract(record,'$.CreditPages'),0)*10);
+ PRAGMA user_version=2;`)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Every earning event is recorded even if capped, so it cannot be replayed tomorrow.
+func earnPointsTx(tx *databaseTx, owner, event, day, kind string, claim bool) (int, error) {
+	if _, err := referralUserTx(tx, owner); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec("INSERT OR IGNORE INTO points_daily(openid,day) VALUES(?,?)", owner, day); err != nil {
+		return 0, err
+	}
+	var earned int
+	if err := tx.QueryRow("SELECT earned FROM points_daily WHERE openid=? AND day=?", owner, day).Scan(&earned); err != nil {
+		return 0, err
+	}
+	awarded := min(pointsReward, max(0, dailyPointsLimit-earned))
+	result, err := tx.Exec("INSERT OR IGNORE INTO points_ledger(event_key,openid,delta,day,kind) VALUES(?,?,?,?,?)", event, owner, awarded, day, kind)
+	if err != nil {
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 0 {
+		return 0, err
+	}
+	claimed := 0
+	if claim {
+		claimed = 1
+	}
+	if _, err = tx.Exec("UPDATE points_daily SET earned=earned+?,claimed=max(claimed,?) WHERE openid=? AND day=?", awarded, claimed, owner, day); err != nil {
+		return 0, err
+	}
+	_, err = tx.Exec("UPDATE referral_users SET credit=credit+? WHERE openid=?", awarded, owner)
+	return awarded, err
+}
+func (s *ReferralStore) login(owner, ref string, now time.Time) error {
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("INSERT OR IGNORE INTO points_logins(openid,first_day) VALUES(?,?)", owner, pointsDay(now))
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 && ref != "" {
+		var inviter string
+		err = tx.QueryRow("SELECT openid FROM referral_users WHERE code=? AND openid<>?", ref, owner).Scan(&inviter)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			if _, err = tx.Exec("INSERT INTO referral_rewards(inviter,invitee) VALUES(?,?)", inviter, owner); err != nil {
+				return err
+			}
+			for _, who := range []string{owner, inviter} {
+				if _, err = earnPointsTx(tx, who, "invite:"+owner+":"+who, pointsDay(now), "invite", false); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if _, err = referralUserTx(tx, owner); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (s *ReferralStore) claim(owner string, now time.Time) (int, error) {
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	day := pointsDay(now)
+	awarded, err := earnPointsTx(tx, owner, "daily:"+owner+":"+day, day, "daily", true)
+	if err != nil {
+		return 0, err
+	}
+	return awarded, tx.Commit()
+}
+func (s *ReferralStore) wallet(owner string, now time.Time) (map[string]any, error) {
+	var balance, earned, claimed int
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	user, err := referralUserTx(tx, owner)
+	if err != nil {
+		return nil, err
+	}
+	balance = user.Credit
+	err = tx.QueryRow("SELECT earned,claimed FROM points_daily WHERE openid=? AND day=?", owner, pointsDay(now)).Scan(&earned, &claimed)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	return map[string]any{"points_balance": balance, "daily_earned": earned, "daily_limit": dailyPointsLimit, "daily_claimed": claimed != 0, "daily_reward": pointsReward, "reward_points": pointsReward, "points_per_page": pointsPerPage, "points_enabled": true}, tx.Commit()
+}
+func (s *Server) handlePointsClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method not allowed")
+		return
+	}
+	if !s.ordersEnabled() {
+		writeError(w, 503, "积分暂未开放")
+		return
+	}
+	owner, _ := r.Context().Value(ctxKeyOpenID).(string)
+	now := time.Now()
+	awarded, err := s.pay.referrals.claim(owner, now)
+	if err != nil {
+		writeError(w, 500, "积分领取失败")
+		return
+	}
+	wallet, err := s.pay.referrals.wallet(owner, now)
+	if err != nil {
+		writeError(w, 500, "积分信息暂不可用")
+		return
+	}
+	wallet["awarded"] = awarded
+	writeJSON(w, 200, wallet)
 }

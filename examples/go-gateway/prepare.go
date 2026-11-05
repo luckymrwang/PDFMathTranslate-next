@@ -293,26 +293,11 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid settings")
 		return
 	}
-	var session string
-	if !input.Trial {
-		if !s.payEnabled() {
-			writeError(w, 503, "付费翻译暂未开放")
-			return
-		}
-		session = s.pay.sessions.get(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if session == "" {
-			writeError(w, 401, "请重新登录后支付")
-			return
-		}
-	}
 	if input.Trial {
-		// The engine is fixed server-side so a trial can never use a paid engine.
-		input.Engine = trialEngine
-		if s.pay.store.hasTrial(owner) {
-			writeError(w, 409, "免费试用已使用过")
-			return
-		}
+		writeError(w, 400, "免费试译已停用，请使用积分翻译")
+		return
 	}
+	session := s.pay.sessions.get(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	languages := map[string]bool{"zh": true, "en": true, "ja": true, "ko": true, "fr": true, "de": true, "es": true}
 	if !languages[input.LangIn] || !languages[input.LangOut] || input.LangIn == input.LangOut {
 		writeError(w, 400, "请选择不同的源语言与目标语言")
@@ -345,31 +330,6 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 429, "操作过于频繁，请一分钟后重试")
 		return
 	}
-	if input.Trial {
-		id, err := newTradeNo()
-		if err != nil {
-			writeError(w, 500, "无法创建订单")
-			return
-		}
-		pages := trialPages
-		if file.Pages < pages {
-			pages = file.Pages
-		}
-		order := PayOrder{ID: id, OpenID: owner, Pages: pages, DocumentPages: file.Pages, Engine: input.Engine,
-			LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
-			Name: file.Name, State: "paid", Provided: true, Trial: true, CreatedAt: time.Now().Unix(), Attach: id}
-		if err := s.pay.store.addInvitedTrial(order, input.Ref); err != nil {
-			if errors.Is(err, errTrialUsed) {
-				writeError(w, 409, "免费试用已使用过")
-			} else {
-				writeError(w, 500, "订单保存失败")
-			}
-			return
-		}
-		saved = true
-		writeJSON(w, 200, map[string]any{"order": orderView(order)})
-		return
-	}
 	billed, credit := file.Pages, 0
 	if input.UpgradeFrom != "" {
 		pages, ok := s.pay.store.trialCredit(input.UpgradeFrom, owner, file.Hash)
@@ -392,28 +352,9 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 		Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
 		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit}
-	err = s.pay.store.addPurchase(&order, billed, func(o *PayOrder, remaining int) error {
-		if remaining == 0 {
-			o.ProductID, o.UnitPrice = s.pay.cfg.productFor(o.Engine)
-			o.State, o.Provided = "paid", true
-			return nil
-		}
-		o.ProductID, o.UnitPrice, o.Quantity, o.Total = s.pay.cfg.orderAmounts(o.Engine, remaining, input.Platform == "ios")
-		if o.Total > 10000000 {
-			return errOrderAmountLimit
-		}
-		signData, err := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID,
-			"buyQuantity": o.Quantity, "env": 0, "currencyType": "CNY", "productId": o.ProductID,
-			"goodsPrice": o.UnitPrice, "outTradeNo": id, "attach": id})
-		o.SignData = string(signData)
-		return err
-	})
+	err = s.pay.store.addPurchase(&order, billed, func(o *PayOrder, remaining int) error { return s.pricePurchase(o, remaining, input.Platform, session) })
 	if err != nil {
-		if errors.Is(err, errOrderAmountLimit) {
-			writeError(w, 400, "订单金额超过限额")
-			return
-		}
-		writeError(w, 500, "订单保存失败")
+		writePurchaseError(w, err)
 		return
 	}
 	saved = true

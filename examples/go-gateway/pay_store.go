@@ -130,6 +130,7 @@ type PayOrder struct {
 	// spent on this order, given back once (CreditReturned) if it closes unpaid or is refunded.
 	ReferredBy     string
 	CreditPages    int
+	CreditPoints   int
 	CreditReturned bool
 	// PaymentClosed records a platform-confirmed terminal unpaid order.
 	PaymentClosed bool
@@ -248,17 +249,23 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 	}
 	defer tx.Rollback()
 	candidate := *order
-	if standardEngine(candidate.Engine) {
+	if candidate.Engine == "Bing" {
 		var balance int
 		err := tx.QueryRow("SELECT credit FROM referral_users WHERE openid=?", candidate.OpenID).Scan(&balance)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		candidate.CreditPages = min(balance, billed)
+		candidate.CreditPages = min(balance/pointsPerPage, billed)
+		candidate.CreditPoints = candidate.CreditPages * pointsPerPage
 		if candidate.CreditPages > 0 {
-			if _, err := tx.Exec("UPDATE referral_users SET credit=credit-? WHERE openid=?", candidate.CreditPages, candidate.OpenID); err != nil {
+			if _, err := tx.Exec("UPDATE referral_users SET credit=credit-? WHERE openid=?", candidate.CreditPoints, candidate.OpenID); err != nil {
 				return err
 			}
+		}
+	}
+	if candidate.CreditPoints > 0 {
+		if _, err := tx.Exec("INSERT INTO points_ledger(event_key,openid,delta,day,kind) VALUES(?,?,?,'','purchase')", "purchase:"+candidate.ID, candidate.OpenID, -candidate.CreditPoints); err != nil {
+			return err
 		}
 	}
 	if err := price(&candidate, billed-candidate.CreditPages); err != nil {
@@ -277,7 +284,7 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 
 // creditReleased excludes local cancellation: those orders can still be paid late.
 func (o PayOrder) creditReleased() bool {
-	return o.State == "refunded" || (o.State == "closed" && o.PaymentClosed)
+	return (o.Total == 0 && !o.Trial && o.Delivery == "failed") || o.State == "refunded" || (o.State == "closed" && o.PaymentClosed)
 }
 
 // trialUnlimited lifts the one-trial-per-user limit for testing (TRIAL_UNLIMITED=true).
@@ -423,9 +430,9 @@ func (s *OrderStore) update(id string, change func(*PayOrder) error) error {
 		return err
 	}
 	// Also protect orders written by older versions before reservations were enforced.
-	if order.TrialCredit > 0 && order.UpgradeFrom != "" && (order.State == "paid" || order.State == "submitted") {
+	if order.TrialCredit > 0 && order.UpgradeFrom != "" && !order.creditReleased() && (order.State == "paid" || order.State == "submitted") {
 		for otherID, other := range s.orders {
-			if otherID != id && other.UpgradeFrom == order.UpgradeFrom && other.TrialCredit > 0 &&
+			if otherID != id && other.UpgradeFrom == order.UpgradeFrom && other.TrialCredit > 0 && !other.creditReleased() &&
 				(other.State == "paid" || other.State == "submitted") {
 				return errors.New("trial credit already consumed")
 			}

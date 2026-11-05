@@ -11,16 +11,17 @@ async function run() {
   const realPayment = require(path.join(root, 'utils/payment.js'))
   const payment = { ...realPayment, isIOS: () => false, assertPaymentSupported() {},
     pay: async () => { throw { errMsg: 'requestVirtualPayment:fail cancel' } } }
-  const config = { enabled: true, trial_enabled: true, trial_available: true, trial_pages: 3, trial_engine: 'Bing',
+  const config = { enabled: true, points_enabled: true, points_balance: 0, points_per_page: 10,
     standard_price_fen: 10, enhanced_price_fen: 30, engine_prices_fen: { 'GPT-6': 40 } }
   let orders = [], freeOrders = false
   const api = {
     getPayConfig: async () => config,
-    getReferral: async () => ({ code: 'MINE2345', reward_pages: 5 }),
+    getReferral: async () => ({ code: 'MINE2345', reward_points: 100, points_balance: config.points_balance || 0 }),
+    claimPoints: async () => { config.points_balance = 100; return { points_balance: 100, daily_claimed: true, daily_earned: 100, awarded: 100 } },
     createPreparedOrder: async (token, data) => {
       created.push({ token, data })
       if (data.trial) return { order: { id: 'trial-1', engine: 'Bing', pages: 3 } }
-      return freeOrders ? { order: { id: 'free-1', state: 'paid' } } : { order: { id: 'paid-1' }, payData: {} }
+      return freeOrders ? { order: { id: 'free-1', state: 'paid', total_fen: 0, points_spent: 120, credit_pages: 12 } } : { order: { id: 'paid-1', total_fen: 270 }, payData: {} }
     },
     listPayOrders: async () => ({ orders }),
     cancelPayOrder: async () => ({}),
@@ -63,17 +64,14 @@ async function run() {
   home.preparedFile = { path: 'file.pdf', file_token: 'prepared-token', page_count: 12, expires_at: Date.now() / 1000 + 1800 }
   await home.getPaymentConfig()
   assert.equal(home.data.trialKnown, true)
+  home.availableEngines = new Set(['Bing', 'GPT-6'])
   await Promise.all([home.onPrimaryAction(), home.onPrimaryAction()])
-  assert.equal(created.length, 1, 'Double taps cannot consume multiple trials')
-  assert.equal(created[0].data.trial, true)
-  assert.equal(created[0].data.engine, 'Bing', 'Trial uses standard engine independently of full-document choice')
-  assert.equal(created[0].data.ref, 'INVITE23', 'The trial carries the invite code')
-  assert.equal(home.data.paymentSheet, false, 'No payment dialog for trial')
-  assert.equal(navigated, 1)
-  const trialJob = app.globalData.translation
-  assert.equal(trialJob.pageCount, 3)
-  assert.equal(trialJob.originalPageCount, 12)
-  assert.equal(trialJob.fullEngine, 'GPT-6')
+  assert.equal(created.length, 0, 'Opening a quote never creates an order or free trial')
+  assert.equal(home.data.paymentSheet, true)
+  assert.equal(home.data.trialAvailable, false)
+  const trialJob = { name: 'old.pdf', orderID: 'trial-1', pageCount: 3, originalPageCount: 12,
+    trial: true, engine: 'Bing', fullEngine: 'GPT-6', createdAt: Date.now() }
+  app.globalData.translation = trialJob
   let quotes = 0
   const openPaymentSheet = home.openPaymentSheet
   home.openPaymentSheet = () => { quotes++ }
@@ -101,7 +99,7 @@ async function run() {
   // onLoad already started loading; let the shared request finish.
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(preview.data.inviteCode, 'MINE2345')
-  assert.equal(preview.data.rewardPages, 5)
+  assert.equal(preview.data.rewardPoints, 100)
   const resultShare = preview.onShareAppMessage()
   assert.equal(resultShare.path, '/pages/index/index?ref=MINE2345')
   assert.equal(resultShare.imageUrl, '/assets/share-card.jpg')
@@ -119,19 +117,45 @@ async function run() {
   // A regular order offers every engine in the payment sheet and credits nothing.
   home.availableEngines = new Set(['Bing', 'Google', 'DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'])
   assert.equal(home.upgradeChoices(12).map(c => c.engine).join(), 'Bing,Google,DeepSeek-V4.1-Flash,GPT-5.6,GPT-6')
-  assert.equal(home.quoteValues(12, 'Bing').creditPages, 0)
+  assert.equal(home.quoteValues(12, 'Bing').trialCreditPages, 0)
   assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '1.20')
 
-  // Referral pages cover standard pages only; a fully covered order skips WeChat payment.
-  home.setData({ creditPages: 5 })
-  assert.equal(home.quoteValues(12, 'Bing').referralPages, 5)
-  assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '0.70')
-  assert.equal(home.quoteValues(12, 'GPT-6').referralPages, 0, 'AI models are not covered')
-  home.setData({ creditPages: 20 })
+  // Claims and quote updates must not overwrite wallet balances.
+  let claimCalls = 0
+  const claim = api.claimPoints
+  api.claimPoints = async () => { claimCalls++; return claim() }
+  let resolveOldWallet
+  const getReferral = api.getReferral
+  api.getReferral = () => new Promise(resolve => { resolveOldWallet = resolve })
+  const oldWalletRead = home.loadWallet()
+  await Promise.all([home.claimDailyPoints(), home.claimDailyPoints()])
+  resolveOldWallet({ points_balance: 0, daily_claimed: false })
+  await oldWalletRead
+  api.getReferral = getReferral
+  assert.equal(claimCalls, 1, 'Double taps only send one daily claim')
+  assert.equal(home.data.pointsBalance, 100)
+  assert.equal(home.data.dailyClaimed, true)
+  home.setData(home.quoteValues(12, 'Bing'))
+  home.setData(home.quoteValues(12, 'Bing'))
+  assert.equal(home.data.pointsBalance, 100)
+  assert.equal(home.data.pointsCoveredPages, 10)
+  assert.equal(home.data.paymentTotal, '0.20')
+  assert.equal(home.quoteValues(12, 'Google').pointsCoveredPages, 0)
+  assert.equal(home.quoteValues(12, 'GPT-6').pointsCoveredPages, 0)
+  home.setData({ pointsBalance: 9 })
+  assert.equal(home.quoteValues(12, 'Bing').pointsCoveredPages, 0)
+  home.setData({ pointsBalance: 19 })
+  assert.equal(home.quoteValues(12, 'Bing').pointsSpent, 10)
+  home.setData({ pointsBalance: 200, inviteCode: 'MINE2345' })
   assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '0.00')
-  home.setData({ inviteCode: 'MINE2345' })
   assert.ok(home.onShareAppMessage().path.endsWith('?ref=MINE2345'))
-  home.setData({ creditPages: 0 })
+  assert.ok(home.onShareAppMessage().title.includes('100 积分'))
+  home.setData({ pointsBalance: 0 })
+
+  home.setData({ paymentSheet: true, pageCount: 10, engine: 'Bing' })
+  home.applyWallet({ points_balance: 100 })
+  assert.equal(home.data.paymentTotal, '0.00', 'Wallet refresh updates an open uncreated quote')
+  home.applyWallet({ points_balance: 0 })
 
   // Upgrade sheet: credit the trial pages, switch engines, and send the trial to the gateway.
   Object.assign(home.data, { engines: ['DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'], engine: 'GPT-6', mode: 'enhanced', pageCount: 12, sourceIndex: 2, targetIndex: 0 })
@@ -154,17 +178,33 @@ async function run() {
   const paid = created[created.length - 1].data
   assert.equal(paid.upgrade_from, 'trial-1')
   assert.equal(paid.engine, 'DeepSeek-V4.1-Flash')
+  const cancelledCreations = created.length
+  await home.confirmTranslation()
+  assert.equal(created.length, cancelledCreations + 1, 'Cancelled payment retries create a fresh order')
   // Fully covered by referral pages: no WeChat payment, straight to progress.
   freeOrders = true
   const before = navigated
   home.upgrade = null
-  home.setData({ creditPages: 20, engines: ['Bing'], engine: 'Bing', mode: 'standard', paying: false })
+  home.setData({ pointsBalance: 200, engines: ['Bing'], engine: 'Bing', mode: 'standard', paying: false })
   home.setData(home.quoteValues(12, 'Bing'))
   home.paymentIntent = { job: home.makeJob(), fileToken: 'free-file' }
   payment.assertPaymentSupported = () => { throw new Error('free orders must not require WeChat payment') }
   await home.confirmTranslation()
   assert.equal(navigated, before + 1, 'Free order opens the progress page')
   assert.equal(app.globalData.translation.orderID, 'free-1')
-  console.log('PASS: three-page trial, upgrade banner, trial result upgrade, engine choice, trial-page and referral credit')
+  // Lazy login carries the environment-scoped invitation on the first request.
+  let loginBody
+  const apiModule = { exports: {} }
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'utils/api.js'), 'utf8'), {
+    module: apiModule, require: name => name === './storage-key' ? { storageKey: k => 'dev:' + k } : { baseUrl: 'https://dev.2026669.me' },
+    wx: { getStorageSync: k => cache[k], setStorageSync: (k, value) => { cache[k] = value },
+      login: ({ success }) => success({ code: 'wx-code' }), request: options => {
+        loginBody = options.data; options.success({ statusCode: 200, data: { token: 'new-token' } })
+      } },
+  })
+  await apiModule.exports.login()
+  assert.equal(loginBody.ref, 'INVITE23')
+  assert.equal(cache['dev:gw_token'], 'new-token')
+  console.log('PASS: points claim, Bing-only quotes, wallet stability, historical upgrades and points-only orders')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

@@ -6,7 +6,7 @@ The gateway stores order metadata and referral balances in `VIRTUALPAY_DATA_DIR/
 
 A single gateway process owns a data directory. Do not run multiple gateways against it, edit the database while the gateway is running, or place it on a network filesystem. Order snapshots are cached in memory; SQL changes made outside the gateway are not picked up until restart.
 
-WAL mode, `synchronous=FULL`, foreign keys and a five-second busy timeout are enabled. Order creation and referral reservation commit together. Delivery and its referral reward commit together. Refund/platform-confirmed closure, credit return and the return marker commit together. Local cancellation retains the credit reservation because payment may arrive late.
+WAL mode, `synchronous=FULL`, foreign keys and a five-second busy timeout are enabled. Order creation and points debit commit together. First login, invitation binding, both rewards and daily cap checks commit together. Refund/platform-confirmed closure, credit return and the return marker commit together. Local cancellation retains the credit reservation because payment may arrive late.
 
 ## First startup and JSON migration
 
@@ -33,3 +33,30 @@ PRAGMA integrity_check;
 For the simplest consistent backup, stop the gateway, back up the entire data directory, then restart it. For a live database use SQLite's online backup API or the `sqlite3` CLI `.backup` command, and back up PDFs separately with retention coordinated with the gateway. Do not copy only `gateway.db` while it is running: committed writes can still reside in `gateway.db-wal`. Never delete WAL/SHM files manually.
 
 The runtime image does not install the SQLite CLI. Use host tooling or a separate maintenance environment, with the gateway stopped for any manual modification. Backups contain user identities and payment metadata and must be protected accordingly.
+
+## Version 2 points migration
+
+Startup imports legacy JSON first, then upgrades version 1 to 2 in the same immediate transaction.
+`referral_users.credit` now stores integer points: old unspent page balances are multiplied by 10 once.
+Every old order receives explicit `CreditPoints = CreditPages * 10`, preserving `CreditReturned`
+and `referral_returns` so historical reservations return in the right units exactly once.
+The version marker prevents conversion on restart. Migration and returns do not consume earning caps.
+
+`points_logins` records first login, `referral_rewards` records invitation bindings,
+`points_daily` tracks Beijing-day earning/claim status, and `points_ledger` has unique events for
+invites, daily claims, purchase debits and returns. Capped earning events have zero delta and
+cannot be replayed on another day. Old return markers remain authoritative.
+Known order owners, referral account owners, historical invitees and recorded inviters are seeded
+as existing users. Previously login-only users had no durable record; their first persisted login
+after upgrade is the registration baseline. Historical trial archival never grants new points.
+
+Back up the complete database directory before upgrade. A version 1 binary refuses version 2;
+rollback requires restoring the complete pre-upgrade backup, including coordinated PDF state.
+
+Submission recovery distinguishes confirmed failure from uncertain acceptance. Local engine/source
+preflight failures and explicit worker 4xx rejection consume the bounded delivery retry budget;
+exhaustion marks delivery failed and returns full-points reservations once. Transport errors,
+5xx responses, malformed success payloads and post-submit storage errors may hide an existing
+worker task: recovery retains the same idempotency key and reservation until the worker resolves
+the outcome. These ambiguous cases are not automatically refunded or resubmitted under a new key.
+Released historical upgrade reservations do not block replacement orders from progressing.

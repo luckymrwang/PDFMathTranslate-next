@@ -189,18 +189,28 @@ wx.uploadFile({
 
 ### 与小程序联调
 
-首页直接提供一次免费标准试译，最多翻译前 3 页；不足 3 页按实际页数处理。
-试译结果页可准备原文全文报价，原文总页数独立保存在订单中。升级下单时传
-`upgrade_from`（试译订单号）且文件与试译相同，则已试译的页数不再计费，但仍翻译
-全文；每次试译只抵扣一次，抵扣页数以订单的 `trial_credit_pages` 为准。
+积分服务始终启用并使用 SQLite 持久化；现金支付由 `VIRTUALPAY_ENABLED` 单独控制。
+`POST /api/login` 接收 `code` 和可选的 `ref`，微信校验成功后的首次持久化登录绑定邀请。
+邀请双方各获 100 积分，每位用户独立受北京时间自然日 500 积分获取上限约束。
+手动 `POST /pay/points/claim` 每天领取一次 100 积分，和邀请奖励共享上限；余额不清零。
+封顶的邀请事件仍被记录，不会跨日补发。领取响应的 `awarded` 是实际发放数。
 
-邀请奖励：`GET /pay/referral` 返回当前用户的邀请码与剩余奖励页数（`/pay/config` 的
-`credit_pages` 同为余额）。新用户带 `ref` 邀请码创建试译时记录邀请人；该试译交付后
-邀请人获得 5 页，邀请人数不设上限。奖励页只抵扣标准翻译（Bing/Google），下单
-时预留，订单关闭或退款后自动退回；全部被抵扣的订单无需支付，直接进入已支付状态。
-奖励数据保存在 `VIRTUALPAY_DATA_DIR/referrals.json`。仅试译环境可
-设置 `TRIAL_ENABLED=true`、`VIRTUALPAY_ENABLED=false`，此时免费试译无需
-支付密钥，但付费下单和直接免费全文翻译均被拒绝。试译不代表支付成功。
+`GET /pay/referral` 和 `GET /pay/config` 返回 `points_balance`、`daily_earned`、
+`daily_limit`、`daily_claimed`、`daily_reward`、`reward_points`、`points_per_page`、
+`points_enabled`；前者另有 `code`/`invited`，后者的 `enabled` 只代表现金支付。
+这些路由及领取接口均需 Bearer 鉴权。
+
+仅 Bing 每 10 积分抵扣完整 1 页，不足 10 的部分保留；Google 和其他引擎原价付费。
+准备文件与直接上传两种下单路径都在单个事务中扣分、定价、保存订单。
+订单 `points_spent` 是消耗积分，`points_covered_pages`/`credit_pages` 是积分抵扣页数，
+`trial_credit_pages` 独立表示历史试译抵扣。全积分订单直接返回 paid，无 payData，
+无需支付配置或会话签名；现金不足部分在支付关闭时明确报错，不免费放行。
+现金余款仍使用既有 iOS 档位及最低金额规则。
+
+新建 `trial:true` 明确拒绝，`trial_enabled`/`trial_available` 均为 false，旧 TRIAL 开关不再开放入口。
+历史试译仍可查看、恢复，并用 `upgrade_from` 对同一文件合法抵扣一次已试译页数。
+历史试译交付不再发奖励。全积分订单最终交付失败本地退分一次；含现金订单仍以平台确认
+退款/关闭为准，单纯本地取消不释放预留积分。直接 `/api/translate` 免费全文入口被封锁。
 
 1. 在本项目启动 Python 服务：`PDF2ZH_API_HOST=127.0.0.1 pdf2zh --api`（默认端口 `11008`）；不要把未鉴权的 Python API 直接暴露到公网。
 2. 设置 `WECHAT_APPSECRET` 和至少 16 字节的 `JWT_SECRET` 后运行 `go run .`。
