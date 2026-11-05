@@ -20,7 +20,7 @@ const configs = {}
 for (const env of ['develop', 'trial', 'release']) {
   const config = loadConfig(env)
   configs[env] = config
-  assert.equal(config.baseUrl, env !== 'release' ? 'https://dev.2026669.me' : 'https://2026669.me')
+  assert.equal(config.baseUrl, 'https://2026669.me')
   assert.equal(config.demoMode, false)
   const module = { exports: {} }
   vm.runInNewContext(fs.readFileSync(path.join(root, 'utils/storage-key.js'), 'utf8'), {
@@ -28,10 +28,10 @@ for (const env of ['develop', 'trial', 'release']) {
     require: name => { assert.equal(name, '../config'); return config },
   })
   for (const key of keys) {
-    assert.equal(module.exports.storageKey(key), env !== 'release' ? `dev:${key}` : key)
+    assert.equal(module.exports.storageKey(key), key)
   }
 }
-assert.notEqual(configs.develop.storagePrefix, configs.release.storagePrefix)
+assert.equal(configs.develop.storagePrefix, configs.release.storagePrefix)
 assert.equal(configs.develop.storagePrefix, configs.trial.storagePrefix)
 assert.throws(() => loadConfig('unknown'), /未知/)
 

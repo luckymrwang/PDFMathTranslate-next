@@ -12,7 +12,9 @@ async function run() {
   const payment = { ...realPayment, isIOS: () => false, assertPaymentSupported() {},
     pay: async () => { throw { errMsg: 'requestVirtualPayment:fail cancel' } } }
   const config = { enabled: true, points_enabled: true, points_balance: 0, points_per_page: 10,
-    standard_price_fen: 10, enhanced_price_fen: 30, engine_prices_fen: { 'GPT-6': 40 } }
+    standard_price_fen: 10, enhanced_price_fen: 30,
+    engine_prices_fen: { 'GPT-6': 40, 'DeepSeek-V4.1-Flash': 20 },
+    engine_points_per_page: { Bing: 10, 'DeepSeek-V4.1-Flash': 20 } }
   let orders = [], freeOrders = false
   const api = {
     getPayConfig: async () => config,
@@ -142,6 +144,13 @@ async function run() {
   assert.equal(home.data.paymentTotal, '0.20')
   assert.equal(home.quoteValues(12, 'Google').pointsCoveredPages, 0)
   assert.equal(home.quoteValues(12, 'GPT-6').pointsCoveredPages, 0)
+  // DeepSeek accepts points at its own 20-points-per-page rate and 0.2 yuan price.
+  const deepSeek = home.quoteValues(12, 'DeepSeek-V4.1-Flash')
+  assert.equal(deepSeek.pointsCoveredPages, 5)
+  assert.equal(deepSeek.pointsSpent, 100)
+  assert.equal(deepSeek.pointsAmount, '1.00')
+  assert.equal(deepSeek.paymentTotal, '1.40')
+  assert.equal(home.quoteValues(12, 'DeepSeek-V4.1-Flash').unitPrice, '0.20')
   home.setData({ pointsBalance: 9 })
   assert.equal(home.quoteValues(12, 'Bing').pointsCoveredPages, 0)
   home.setData({ pointsBalance: 19 })
@@ -172,7 +181,7 @@ async function run() {
   home.paymentIntent = { job: home.makeJob(), fileToken: 'trial-file' }
   home.setData({ orderReady: true, paymentSheet: true })
   home.selectUpgradeEngine({ currentTarget: { dataset: { engine: 'DeepSeek-V4.1-Flash' } } })
-  assert.equal(home.data.paymentTotal, '2.70')
+  assert.equal(home.data.paymentTotal, '1.80')
   assert.equal(home.paymentIntent.job.engine, 'DeepSeek-V4.1-Flash')
   await home.confirmTranslation()
   const paid = created[created.length - 1].data
@@ -205,6 +214,6 @@ async function run() {
   await apiModule.exports.login()
   assert.equal(loginBody.ref, 'INVITE23')
   assert.equal(cache['dev:gw_token'], 'new-token')
-  console.log('PASS: points claim, Bing-only quotes, wallet stability, historical upgrades and points-only orders')
+  console.log('PASS: points claim, Bing/DeepSeek quotes, wallet stability, historical upgrades and points-only orders')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

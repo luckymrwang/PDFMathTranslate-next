@@ -16,35 +16,55 @@ func TestProductForEngine(t *testing.T) {
 	check("GPT-6", "enhanced", 30)
 	check("DeepSeek-V4.1-Flash", "enhanced", 30)
 
-	cfg.EngineProducts = map[string]enginePrice{"Google": {"google", 20}, "GPT-6": {"gpt", 40}}
+	cfg.EngineProducts = map[string]enginePrice{"Google": {"google", 20}, "GPT-6": {"gpt", 40}, "DeepSeek-V4.1-Flash": {"deepseek", 20}}
 	check("Bing", "standard", 10)
 	check("Google", "google", 20)
 	check("GPT-6", "gpt", 40)
 	check("GPT-5.6", "enhanced", 30)
-	check("DeepSeek-V4.1-Flash", "enhanced", 30)
+	check("DeepSeek-V4.1-Flash", "deepseek", 20)
 }
 
 func TestLoadPayConfigEngineProducts(t *testing.T) {
+	// Without any DeepSeek env pair the engine is still priced at its own 20-fen
+	// rate so quotes work in points-only deployments.
+	cfg, err := loadPayConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if product, price := cfg.productFor("DeepSeek-V4.1-Flash"); product != "" || price != 20 {
+		t.Fatalf("disabled default: got %s/%d, want /20", product, price)
+	}
+
 	for key, value := range map[string]string{
 		"VIRTUALPAY_ENABLED": "true", "VIRTUALPAY_OFFER_ID": "offer", "VIRTUALPAY_APP_KEY": "key",
 		"VIRTUALPAY_NOTIFY_TOKEN": "token", "VIRTUALPAY_ENCODING_AES_KEY": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
 		"VIRTUALPAY_STANDARD_PRODUCT_ID": "standard", "VIRTUALPAY_STANDARD_PRICE_FEN": "10",
 		"VIRTUALPAY_ENHANCED_PRODUCT_ID": "enhanced", "VIRTUALPAY_ENHANCED_PRICE_FEN": "30",
 		"VIRTUALPAY_GPT_PRODUCT_ID": "gpt", "VIRTUALPAY_GPT_PRICE_FEN": "40",
+		"VIRTUALPAY_DEEPSEEK_PRODUCT_ID": "deepseek", "VIRTUALPAY_DEEPSEEK_PRICE_FEN": "20",
 	} {
 		t.Setenv(key, value)
 	}
-	cfg, err := loadPayConfig()
+	cfg, err = loadPayConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if product, price := cfg.productFor("GPT-6"); product != "gpt" || price != 40 {
 		t.Fatalf("GPT-6: got %s/%d", product, price)
 	}
+	if product, price := cfg.productFor("DeepSeek-V4.1-Flash"); product != "deepseek" || price != 20 {
+		t.Fatalf("DeepSeek: got %s/%d", product, price)
+	}
 
 	t.Setenv("VIRTUALPAY_GOOGLE_PRICE_FEN", "20")
 	if _, err := loadPayConfig(); err == nil {
 		t.Fatal("price without product must be rejected")
+	}
+	// Enabled deployments must register a dedicated DeepSeek product for its 20-fen price.
+	t.Setenv("VIRTUALPAY_GOOGLE_PRICE_FEN", "")
+	t.Setenv("VIRTUALPAY_DEEPSEEK_PRODUCT_ID", "")
+	if _, err := loadPayConfig(); err == nil {
+		t.Fatal("enabled without a DeepSeek product must be rejected")
 	}
 }
 
@@ -108,6 +128,7 @@ func TestLoadPayConfigIOSProduct(t *testing.T) {
 		"VIRTUALPAY_NOTIFY_TOKEN": "token", "VIRTUALPAY_ENCODING_AES_KEY": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
 		"VIRTUALPAY_STANDARD_PRODUCT_ID": "standard", "VIRTUALPAY_STANDARD_PRICE_FEN": "10",
 		"VIRTUALPAY_ENHANCED_PRODUCT_ID": "enhanced", "VIRTUALPAY_ENHANCED_PRICE_FEN": "30",
+		"VIRTUALPAY_DEEPSEEK_PRODUCT_ID": "deepseek", "VIRTUALPAY_DEEPSEEK_PRICE_FEN": "20",
 	} {
 		t.Setenv(key, value)
 	}

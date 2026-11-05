@@ -197,10 +197,14 @@ wx.uploadFile({
 
 `GET /pay/referral` 和 `GET /pay/config` 返回 `points_balance`、`daily_earned`、
 `daily_limit`、`daily_claimed`、`daily_reward`、`reward_points`、`points_per_page`、
-`points_enabled`；前者另有 `code`/`invited`，后者的 `enabled` 只代表现金支付。
+`engine_points_per_page`、`points_enabled`；前者另有 `code`/`invited`，后者的 `enabled` 只代表现金支付。
 这些路由及领取接口均需 Bearer 鉴权。
 
-仅 Bing 每 10 积分抵扣完整 1 页，不足 10 的部分保留；Google 和其他引擎原价付费。
+仅 Bing 和 DeepSeek-V4.1-Flash 支持积分抵扣，按各引擎整页计价：Bing 10 积分/页（0.1 元/页），
+DeepSeek 20 积分/页（0.2 元/页），1 积分始终等于 1 分钱页价；不足整页所需积分的部分保留。
+Google 和其他引擎原价付费。DeepSeek 页价独立于增强档（默认 20 分），现金支付部署必须
+配置专属微信商品 `VIRTUALPAY_DEEPSEEK_PRODUCT_ID` 与 `VIRTUALPAY_DEEPSEEK_PRICE_FEN=20`，
+启用支付但缺少该商品时网关拒绝启动。
 准备文件与直接上传两种下单路径都在单个事务中扣分、定价、保存订单。
 订单 `points_spent` 是消耗积分，`points_covered_pages`/`credit_pages` 是积分抵扣页数，
 `trial_credit_pages` 独立表示历史试译抵扣。全积分订单直接返回 paid，无 payData，
@@ -214,7 +218,7 @@ wx.uploadFile({
 
 1. 在本项目启动 Python 服务：`PDF2ZH_API_HOST=127.0.0.1 pdf2zh --api`（默认端口 `11008`）；不要把未鉴权的 Python API 直接暴露到公网。
 2. 设置 `WECHAT_APPSECRET` 和至少 16 字节的 `JWT_SECRET` 后运行 `go run .`。
-3. 小程序目录 `/Users/sino/Documents/www/bucket/wxapp/pdftranslate` 的 `config.js` 按版本选择地址：开发版、体验版使用 `https://dev.2026669.me`，正式版使用 `https://2026669.me`。独立开发环境部署见 [开发环境操作说明](../../deploy/DEVELOPMENT.md)。如需本机联调，可临时修改 develop 对应地址为 `http://127.0.0.1:8080`，并在开发者工具关闭合法域名校验。
+3. 小程序目录 `/Users/sino/Documents/www/bucket/wxapp/pdftranslate` 的 `config.js` 按版本选择地址：当前开发版、体验版和正式版均使用 `https://2026669.me`（开发版连开发后端时改为 `https://dev.2026669.me`，存储前缀会随之切换）。独立开发环境部署见 [开发环境操作说明](../../deploy/DEVELOPMENT.md)。如需本机联调，可临时修改 develop 对应地址为 `http://127.0.0.1:8080`，并在开发者工具关闭合法域名校验。
 4. 在微信公众平台将正式和开发域名都配置为 request、uploadFile、downloadFile 合法域名。若启用对象存储直连下载，存储下载域名也须列入 downloadFile 合法域名；代理下载只需网关域名。`127.0.0.1` 在手机上指手机自身，不能用于真机。
 
 真实模式确认弹层由服务器读取 PDF 实际页数并返回订单金额，再调用 `wx.requestVirtualPayment`。只有服务端确认已支付才能开始翻译。演示模式仍为本地估算，不扣费。

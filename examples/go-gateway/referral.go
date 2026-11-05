@@ -190,6 +190,8 @@ func (s *Server) handleReferral(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wallet["code"], wallet["invited"] = user.Code, len(user.Rewarded)
+	// Field kept for already-released clients that still display page credits.
+	wallet["credit_pages"] = user.Credit / pointsPerPage
 	writeJSON(w, 200, wallet)
 }
 
@@ -208,6 +210,15 @@ func logReferral(action, orderID string, err error) {
 const pointsPerPage = 10
 const dailyPointsLimit = 500
 const pointsReward = 100
+
+// deepSeekPointsPerPage matches DeepSeek-V4.1-Flash's discounted 0.2 元/页 price:
+// one point still equals one fen of page price.
+const deepSeekPointsPerPage = 20
+
+// enginePointsPerPage lists the engines whose pages points can redeem and the
+// points each page costs. Google and the remaining AI models are cash-only.
+// Keep DeepSeek's rate in sync with VIRTUALPAY_DEEPSEEK_PRICE_FEN.
+var enginePointsPerPage = map[string]int{"Bing": pointsPerPage, "DeepSeek-V4.1-Flash": deepSeekPointsPerPage}
 
 var chinaTime = time.FixedZone("Asia/Shanghai", 8*60*60)
 
@@ -327,7 +338,7 @@ func (s *ReferralStore) wallet(owner string, now time.Time) (map[string]any, err
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	return map[string]any{"points_balance": balance, "daily_earned": earned, "daily_limit": dailyPointsLimit, "daily_claimed": claimed != 0, "daily_reward": pointsReward, "reward_points": pointsReward, "points_per_page": pointsPerPage, "points_enabled": true}, tx.Commit()
+	return map[string]any{"points_balance": balance, "daily_earned": earned, "daily_limit": dailyPointsLimit, "daily_claimed": claimed != 0, "daily_reward": pointsReward, "reward_points": pointsReward, "points_per_page": pointsPerPage, "engine_points_per_page": enginePointsPerPage, "points_enabled": true}, tx.Commit()
 }
 func (s *Server) handlePointsClaim(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

@@ -36,7 +36,12 @@ type enginePrice struct {
 }
 
 // engineProductEnv maps an engine to its optional VIRTUALPAY_<PREFIX>_PRODUCT_ID / _PRICE_FEN pair.
-var engineProductEnv = map[string]string{"Google": "GOOGLE", "GPT-6": "GPT"}
+var engineProductEnv = map[string]string{"Google": "GOOGLE", "GPT-6": "GPT", "DeepSeek-V4.1-Flash": "DEEPSEEK"}
+
+// deepSeekPriceFen is DeepSeek-V4.1-Flash's per-page price. It differs from the
+// enhanced product, so cash-payment deployments need a dedicated WeChat product
+// (VIRTUALPAY_DEEPSEEK_PRODUCT_ID); without one the engine is still quoted at this price.
+const deepSeekPriceFen = 20
 
 func loadPayConfig() (*PayConfig, error) {
 	c := &PayConfig{Enabled: os.Getenv("VIRTUALPAY_ENABLED") == "true",
@@ -49,26 +54,37 @@ func loadPayConfig() (*PayConfig, error) {
 		EngineProducts:  map[string]enginePrice{}}
 	c.StandardPrice, _ = strconv.Atoi(os.Getenv("VIRTUALPAY_STANDARD_PRICE_FEN"))
 	c.EnhancedPrice, _ = strconv.Atoi(os.Getenv("VIRTUALPAY_ENHANCED_PRICE_FEN"))
+	// Engine prices are parsed with cash payment disabled too, so quotes (and the
+	// DeepSeek default below) reach clients in points-only deployments.
+	for engine, prefix := range engineProductEnv {
+		product := os.Getenv("VIRTUALPAY_" + prefix + "_PRODUCT_ID")
+		rawPrice := os.Getenv("VIRTUALPAY_" + prefix + "_PRICE_FEN")
+		if product == "" && rawPrice == "" {
+			if engine == "DeepSeek-V4.1-Flash" {
+				c.EngineProducts[engine] = enginePrice{"", deepSeekPriceFen}
+			}
+			continue
+		}
+		price, err := strconv.Atoi(rawPrice)
+		if err != nil || price <= 0 || price > 100000 {
+			return nil, fmt.Errorf("VIRTUALPAY_%s_PRODUCT_ID and VIRTUALPAY_%s_PRICE_FEN must be set together with a valid fen price", prefix, prefix)
+		}
+		if c.Enabled && product == "" {
+			return nil, fmt.Errorf("VIRTUALPAY_%s_PRODUCT_ID is required when virtual payment is enabled", prefix)
+		}
+		c.EngineProducts[engine] = enginePrice{product, price}
+	}
 	if !c.Enabled {
 		return c, nil
+	}
+	if p := c.EngineProducts["DeepSeek-V4.1-Flash"]; p.Product == "" {
+		return nil, errors.New("virtual payment enabled but VIRTUALPAY_DEEPSEEK_PRODUCT_ID is missing: DeepSeek has its own 20-fen price and cannot use the enhanced product")
 	}
 	if c.OfferID == "" || c.AppKey == "" || c.NotifyToken == "" || c.StandardProduct == "" || c.EnhancedProduct == "" {
 		return nil, errors.New("virtual payment enabled but required configuration is missing")
 	}
 	if c.StandardPrice <= 0 || c.EnhancedPrice <= 0 || c.StandardPrice > 100000 || c.EnhancedPrice > 100000 {
 		return nil, errors.New("virtual payment product prices must be valid integer fen")
-	}
-	for engine, prefix := range engineProductEnv {
-		product := os.Getenv("VIRTUALPAY_" + prefix + "_PRODUCT_ID")
-		rawPrice := os.Getenv("VIRTUALPAY_" + prefix + "_PRICE_FEN")
-		if product == "" && rawPrice == "" {
-			continue
-		}
-		price, err := strconv.Atoi(rawPrice)
-		if product == "" || err != nil || price <= 0 || price > 100000 {
-			return nil, fmt.Errorf("VIRTUALPAY_%s_PRODUCT_ID and VIRTUALPAY_%s_PRICE_FEN must be set together with a valid fen price", prefix, prefix)
-		}
-		c.EngineProducts[engine] = enginePrice{product, price}
 	}
 	if _, err := decodeAESKey(c.AESKey); err != nil {
 		return nil, err
@@ -249,14 +265,16 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 	}
 	defer tx.Rollback()
 	candidate := *order
-	if candidate.Engine == "Bing" {
+	// Bing and DeepSeek pages can be redeemed with points; one point equals one
+	// fen of the engine's page price.
+	if per := enginePointsPerPage[candidate.Engine]; per > 0 {
 		var balance int
 		err := tx.QueryRow("SELECT credit FROM referral_users WHERE openid=?", candidate.OpenID).Scan(&balance)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		candidate.CreditPages = min(balance/pointsPerPage, billed)
-		candidate.CreditPoints = candidate.CreditPages * pointsPerPage
+		candidate.CreditPages = min(balance/per, billed)
+		candidate.CreditPoints = candidate.CreditPages * per
 		if candidate.CreditPages > 0 {
 			if _, err := tx.Exec("UPDATE referral_users SET credit=credit-? WHERE openid=?", candidate.CreditPoints, candidate.OpenID); err != nil {
 				return err

@@ -148,7 +148,8 @@ uploadFile、downloadFile 合法域名，保留 `https://2026669.me`。
 当前代码的下单、查单、发货参数仍指向生产支付。开发域名不代表支付沙箱。
 开发环境保留 `VIRTUALPAY_ENABLED=false`。积分订单服务始终启用，`TRIAL_ENABLED`
 不再开放新试译。可测试真实微信登录、双向邀请各 100 分、每日手动领取 100 分、
-北京时间获取上限 500 分，以及 Bing 每页 10 分的全文翻译和结果获取。
+北京时间获取上限 500 分，以及 Bing 每页 10 分、DeepSeek 每页 20 分（0.2 元/页）的
+全文翻译和结果获取。
 全积分订单不依赖支付 AppKey 或会话签名；现金余款明确提示暂不可支付。
 历史试译订单和合法升级抵扣继续有效，直接免费全文翻译入口仍封锁。
 
@@ -161,6 +162,9 @@ uploadFile、downloadFile 合法域名，保留 `https://2026669.me`。
 通知路由方案，再显式设置 `DEV_VIRTUALPAY_ENABLED=true` 启动开发 Compose。
 该变量是 Compose 插值变量，需在启动命令环境中设置；仅放入 gateway 的
 `deploy/dev/.env` 不会启用。不要把正式支付通知地址直接切到开发环境。
+DeepSeek 页价现为 0.2 元/页，与增强档不同：生产网关启用支付时必须新增专属
+微信商品并在 `VIRTUALPAY_DEEPSEEK_PRODUCT_ID` / `VIRTUALPAY_DEEPSEEK_PRICE_FEN=20`
+中配置，缺少商品 ID 网关会拒绝启动。
 模拟支付或支付沙箱需要另行实现。
 
 ## 日常更新
