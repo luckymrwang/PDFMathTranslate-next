@@ -43,6 +43,9 @@ func availableEngines() map[string]map[string]string {
 			"deepseek_model":         getenv("DEEPSEEK_MODEL", "deepseek-flash"),
 			"deepseek_thinking_mode": "disabled",
 		}
+		if base := os.Getenv("DEEPSEEK_BASE_URL"); base != "" {
+			engines["DeepSeek-V4.1-Flash"]["deepseek_base_url"] = base
+		}
 	}
 	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
 		engines["Gemini 2.5 Pro"] = map[string]string{

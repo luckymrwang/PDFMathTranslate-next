@@ -63,3 +63,37 @@ func TestEnginesDoNotExposeSecrets(t *testing.T) {
 		t.Fatalf("unsafe catalog response: status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestDeepSeekBaseUrlForwarded(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "deepseek-secret")
+	t.Setenv("DEEPSEEK_BASE_URL", "https://proxy.example.com/v1")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data map[string]any
+		if err := json.Unmarshal([]byte(r.FormValue("data")), &data); err != nil {
+			t.Errorf("invalid forwarded data: %v", err)
+		}
+		settings, _ := data["translate_engine_settings"].(map[string]any)
+		if settings["deepseek_base_url"] != "https://proxy.example.com/v1" || settings["deepseek_api_key"] != "deepseek-secret" {
+			t.Errorf("wrong server-side settings: %v", settings)
+		}
+		_, _ = io.WriteString(w, `{"id":"job-1"}`)
+	}))
+	defer upstream.Close()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("file", "sample.pdf")
+	_, _ = part.Write([]byte("%PDF-1.7\n"))
+	_ = mw.WriteField("data", `{"lang_in":"en","lang_out":"zh","engine":"DeepSeek-V4.1-Flash"}`)
+	_ = mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/translate", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyOpenID, "openid-1"))
+	w := httptest.NewRecorder()
+	srv := &Server{pdf2zh: NewPdf2zhClient(upstream.URL), tasks: newTaskRegistry()}
+	srv.handleTranslateSubmit(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("submit failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+}

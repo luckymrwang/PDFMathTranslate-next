@@ -200,6 +200,10 @@ class DeepSeekSettings(BaseModel):
     deepseek_api_key: str | None = Field(
         default=None, description="API key for DeepSeek service"
     )
+    deepseek_base_url: str | None = Field(
+        default=None,
+        description="Base URL for DeepSeek service (OpenAI-compatible proxy)",
+    )
     deepseek_enable_json_mode: bool | None = Field(
         default=None, description="Enable JSON mode for DeepSeek service"
     )
@@ -239,6 +243,7 @@ class DeepSeekSettings(BaseModel):
         if not self.deepseek_api_key:
             raise ValueError("DeepSeek API key is required")
         self.deepseek_api_key = _clean_string(self.deepseek_api_key)
+        self.deepseek_base_url = _clean_url(self.deepseek_base_url)
         self.deepseek_model = _clean_string(self.deepseek_model)
         self.deepseek_thinking_mode = _clean_string(self.deepseek_thinking_mode)
         self.deepseek_reasoning_effort = _clean_string(self.deepseek_reasoning_effort)
@@ -254,7 +259,7 @@ class DeepSeekSettings(BaseModel):
         settings = OpenAISettings(
             openai_model=self.deepseek_model,
             openai_api_key=self.deepseek_api_key,
-            openai_base_url="https://api.deepseek.com/v1",
+            openai_base_url=self.deepseek_base_url or "https://api.deepseek.com/v1",
             openai_enable_json_mode=self.deepseek_enable_json_mode,
         )
         if self.deepseek_model and (
