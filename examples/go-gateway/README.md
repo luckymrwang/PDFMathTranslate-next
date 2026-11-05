@@ -200,8 +200,8 @@ wx.uploadFile({
 `engine_points_per_page`、`points_enabled`；前者另有 `code`/`invited`，后者的 `enabled` 只代表现金支付。
 这些路由及领取接口均需 Bearer 鉴权。
 
-仅 Bing 和 DeepSeek-V4.1-Flash 支持积分抵扣，按各引擎整页计价：Bing 10 积分/页（0.1 元/页），
-DeepSeek 20 积分/页（0.2 元/页），1 积分始终等于 1 分钱页价；不足整页所需积分的部分保留。
+仅 Bing 和 DeepSeek-V4.1-Flash 支持积分抵扣，均为 10 积分抵扣 1 整页；积分不足的剩余页按引擎原价
+付费（Bing 0.1 元/页，DeepSeek 0.2 元/页），不足整页所需积分的部分保留。
 Google 和其他引擎原价付费。DeepSeek 页价独立于增强档（默认 20 分），现金支付部署必须
 配置专属微信商品 `VIRTUALPAY_DEEPSEEK_PRODUCT_ID` 与 `VIRTUALPAY_DEEPSEEK_PRICE_FEN=20`，
 启用支付但缺少该商品时网关拒绝启动。

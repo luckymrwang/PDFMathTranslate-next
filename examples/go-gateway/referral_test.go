@@ -284,11 +284,11 @@ func TestPointsWholePagesAndFailureReturn(t *testing.T) {
 		engine string
 		// balance covers the whole billed document for points engines, except DeepSeek's
 		// partial case below.
-		balance        int
+		balance       int
 		covered, left int
 	}{
 		{"Bing", 29, 2, 9},
-		{"DeepSeek-V4.1-Flash", 40, 2, 0},
+		{"DeepSeek-V4.1-Flash", 25, 2, 5},
 		{"Google", 29, 0, 29},
 	}
 	for _, c := range cases {
@@ -329,15 +329,15 @@ func TestPointsWholePagesAndFailureReturn(t *testing.T) {
 		})
 	}
 
-	// DeepSeek costs 20 points per page: a balance below one page is never spent.
+	// DeepSeek costs 10 points per page: a balance below one page is never spent.
 	s := testPayServer(t)
 	s.pay.cfg.Enabled = false
-	if err := s.pay.referrals.restore("owner", 19); err != nil {
+	if err := s.pay.referrals.restore("owner", 9); err != nil {
 		t.Fatal(err)
 	}
 	o := PayOrder{ID: "partial", OpenID: "owner", Engine: "DeepSeek-V4.1-Flash", Pages: 2}
 	if err := s.pay.store.addPurchase(&o, 2, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "ios", "") }); !errors.Is(err, errCashDisabled) ||
-		o.CreditPoints != 0 || s.pay.referrals.credit("owner") != 19 {
+		o.CreditPoints != 0 || s.pay.referrals.credit("owner") != 9 {
 		t.Fatal(o, err)
 	}
 }

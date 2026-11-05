@@ -265,8 +265,8 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 	}
 	defer tx.Rollback()
 	candidate := *order
-	// Bing and DeepSeek pages can be redeemed with points; one point equals one
-	// fen of the engine's page price.
+	// Bing and DeepSeek pages can be redeemed with points (10 per page); the
+	// remaining pages are charged at the engine's cash price.
 	if per := enginePointsPerPage[candidate.Engine]; per > 0 {
 		var balance int
 		err := tx.QueryRow("SELECT credit FROM referral_users WHERE openid=?", candidate.OpenID).Scan(&balance)

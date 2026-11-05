@@ -14,7 +14,7 @@ async function run() {
   const config = { enabled: true, points_enabled: true, points_balance: 0, points_per_page: 10,
     standard_price_fen: 10, enhanced_price_fen: 30,
     engine_prices_fen: { 'GPT-6': 40, 'DeepSeek-V4.1-Flash': 20 },
-    engine_points_per_page: { Bing: 10, 'DeepSeek-V4.1-Flash': 20 } }
+    engine_points_per_page: { Bing: 10, 'DeepSeek-V4.1-Flash': 10 } }
   let orders = [], freeOrders = false
   const api = {
     getPayConfig: async () => config,
@@ -144,12 +144,12 @@ async function run() {
   assert.equal(home.data.paymentTotal, '0.20')
   assert.equal(home.quoteValues(12, 'Google').pointsCoveredPages, 0)
   assert.equal(home.quoteValues(12, 'GPT-6').pointsCoveredPages, 0)
-  // DeepSeek accepts points at its own 20-points-per-page rate and 0.2 yuan price.
+  // DeepSeek redeems 10 points per page like Bing; uncovered pages cost 0.2 yuan.
   const deepSeek = home.quoteValues(12, 'DeepSeek-V4.1-Flash')
-  assert.equal(deepSeek.pointsCoveredPages, 5)
+  assert.equal(deepSeek.pointsCoveredPages, 10)
   assert.equal(deepSeek.pointsSpent, 100)
-  assert.equal(deepSeek.pointsAmount, '1.00')
-  assert.equal(deepSeek.paymentTotal, '1.40')
+  assert.equal(deepSeek.pointsAmount, '2.00')
+  assert.equal(deepSeek.paymentTotal, '0.40')
   assert.equal(home.quoteValues(12, 'DeepSeek-V4.1-Flash').unitPrice, '0.20')
   home.setData({ pointsBalance: 9 })
   assert.equal(home.quoteValues(12, 'Bing').pointsCoveredPages, 0)
@@ -157,6 +157,13 @@ async function run() {
   assert.equal(home.quoteValues(12, 'Bing').pointsSpent, 10)
   home.setData({ pointsBalance: 200, inviteCode: 'MINE2345' })
   assert.equal(home.quoteValues(12, 'Bing').paymentTotal, '0.00')
+  // Fully points-covered engines quote points; cash-only and partly covered ones keep yuan.
+  home.availableEngines = new Set(['Bing', 'DeepSeek-V4.1-Flash', 'GPT-6'])
+  const labels = Object.fromEntries(home.upgradeChoices(12).map(c => [c.engine, c.price + '|' + c.total]))
+  assert.equal(labels.Bing, '10 积分/页|120 积分')
+  assert.equal(labels['DeepSeek-V4.1-Flash'], '10 积分/页|120 积分')
+  assert.equal(labels['GPT-6'], '0.4 元/页|¥4.80')
+  assert.equal(Object.fromEntries(home.upgradeChoices(30).map(c => [c.engine, c.price]))['DeepSeek-V4.1-Flash'], '0.2 元/页')
   assert.ok(home.onShareAppMessage().path.endsWith('?ref=MINE2345'))
   assert.ok(home.onShareAppMessage().title.includes('100 积分'))
   home.setData({ pointsBalance: 0 })

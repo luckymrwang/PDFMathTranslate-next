@@ -211,14 +211,11 @@ const pointsPerPage = 10
 const dailyPointsLimit = 500
 const pointsReward = 100
 
-// deepSeekPointsPerPage matches DeepSeek-V4.1-Flash's discounted 0.2 元/页 price:
-// one point still equals one fen of page price.
-const deepSeekPointsPerPage = 20
-
 // enginePointsPerPage lists the engines whose pages points can redeem and the
-// points each page costs. Google and the remaining AI models are cash-only.
-// Keep DeepSeek's rate in sync with VIRTUALPAY_DEEPSEEK_PRICE_FEN.
-var enginePointsPerPage = map[string]int{"Bing": pointsPerPage, "DeepSeek-V4.1-Flash": deepSeekPointsPerPage}
+// points each page costs. Both redeem at the same 10 points per page; only pages
+// the points cannot cover are charged at the engine's cash price (DeepSeek 0.2 元/页).
+// Google and the remaining AI models are cash-only.
+var enginePointsPerPage = map[string]int{"Bing": pointsPerPage, "DeepSeek-V4.1-Flash": pointsPerPage}
 
 var chinaTime = time.FixedZone("Asia/Shanghai", 8*60*60)
 
