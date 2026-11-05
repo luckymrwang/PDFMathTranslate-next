@@ -38,7 +38,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("payment config error: %v", err)
 	}
-	if payConfig.Enabled || payConfig.TrialEnabled {
+	{
 		store, err := openOrderStore(payConfig.Dir)
 		if err != nil {
 			log.Fatalf("payment storage error: %v", err)
@@ -59,7 +59,7 @@ func main() {
 			}
 		}
 		go srv.runPayReconciliation(context.Background())
-		log.Printf("order service enabled (payment=%t, free_trial=%t, durable order store)", payConfig.Enabled, true)
+		log.Printf("order service enabled (payment=%t, points=%t, durable order store)", payConfig.Enabled, true)
 	}
 	if s3cfg, ok := LoadS3Config(); ok {
 		srv.storage = NewS3Client(s3cfg)
@@ -86,6 +86,7 @@ func main() {
 	mux.Handle("/pay/orders/", srv.authRequired(http.HandlerFunc(srv.handlePayOrders)))
 	mux.Handle("/pay/query", srv.authRequired(http.HandlerFunc(srv.handlePayQuery)))
 	mux.Handle("/pay/referral", srv.authRequired(http.HandlerFunc(srv.handleReferral)))
+	mux.Handle("/pay/points/claim", srv.authRequired(http.HandlerFunc(srv.handlePointsClaim)))
 	mux.HandleFunc("/pay/notify", srv.handlePayNotify)
 
 	httpServer := &http.Server{
@@ -107,6 +108,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // loginRequest is the body of POST /api/login.
 type loginRequest struct {
 	Code string `json:"code"`
+	Ref  string `json:"ref"`
 }
 
 type loginResponse struct {
@@ -142,16 +144,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.payEnabled() && session.SessionKey == "" {
+		writeError(w, 502, "wechat returned no session key")
+		return
+	}
+	if s.ordersEnabled() {
+		if err := s.pay.referrals.login(session.OpenID, req.Ref, time.Now()); err != nil {
+			writeError(w, 500, "积分账户初始化失败")
+			return
+		}
+	}
 	token, err := IssueToken(s.cfg.JWTSecret, session.OpenID, s.cfg.TokenTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to issue token")
 		return
 	}
 	if s.payEnabled() {
-		if session.SessionKey == "" {
-			writeError(w, 502, "wechat returned no session key")
-			return
-		}
 		s.pay.sessions.set(token, session.SessionKey)
 	}
 

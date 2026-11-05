@@ -140,7 +140,7 @@ async function run() {
   await page.confirmTranslation()
   assert.equal(orderCreations, 1, 'Create an order only for an explicit payment action')
   assert.equal(page.data.unitPrice, '0.40')
-  assert.equal(page.data.paymentTotal, '6.40', 'Display follows the configured per-engine price')
+  assert.equal(page.data.paymentTotal, '3.20', 'Created order shows the authoritative server amount')
   assert.equal(page.payData.signData, 'server-payload', 'Keep the actual server payment payload unchanged')
   assert.equal(page.data.orderReady, true)
   page.closePaymentSheet()

@@ -52,7 +52,7 @@ func openDatabase(dir string) (*sql.DB, error) {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return nil, err
 	}
-	if version > 1 {
+	if version > 2 {
 		return nil, fmt.Errorf("unsupported database version %d", version)
 	}
 	tx, err := beginDatabaseTx(db)
@@ -88,7 +88,7 @@ func openDatabase(dir string) (*sql.DB, error) {
   order_id TEXT PRIMARY KEY,
   openid TEXT NOT NULL REFERENCES referral_users(openid)
  );
- PRAGMA user_version=1;`)
+`)
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +103,11 @@ func openDatabase(dir string) (*sql.DB, error) {
 		}
 	} else if err != nil {
 		return nil, err
+	}
+	if version < 2 {
+		if err := migratePoints(tx); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

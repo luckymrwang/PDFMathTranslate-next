@@ -190,3 +190,89 @@ func TestOrderLocksAreIndependent(t *testing.T) {
 		t.Fatal("order locks leaked")
 	}
 }
+
+func TestPointsSubmissionFailuresBoundedAndReturned(t *testing.T) {
+	for _, mode := range []string{"rejected", "engine", "source"} {
+		t.Run(mode, func(t *testing.T) {
+			s := testPayServer(t)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); w.WriteHeader(422) }))
+			defer upstream.Close()
+			s.pdf2zh = NewPdf2zhClient(upstream.URL)
+			o := paidOrderFixture(t, s, "submit-fail", "", 0)
+			if err := s.pay.store.update(o.ID, func(o *PayOrder) error { o.State = "paid"; o.CreditPages = 2; o.CreditPoints = 20; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "engine" {
+				s.pay.store.update(o.ID, func(o *PayOrder) error { o.Engine = "missing"; return nil })
+			}
+			if mode == "source" {
+				os.Remove(o.FilePath)
+			}
+			for i := 0; i < maxPaidAttempts+2; i++ {
+				if _, err := s.startPaidOrder(context.Background(), o.ID); err == nil {
+					t.Fatal("unexpected success")
+				}
+			}
+			current, _ := s.pay.store.get(o.ID)
+			if current.Delivery != "failed" || !current.CreditReturned || s.pay.referrals.credit("owner") != 20 {
+				t.Fatal(current, s.pay.referrals.credit("owner"))
+			}
+		})
+	}
+}
+
+func TestUncertainSubmissionReusesKeyUntilResolved(t *testing.T) {
+	s := testPayServer(t)
+	var keys []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		keys = append(keys, r.Header.Get("X-Idempotency-Key"))
+		if len(keys) <= maxPaidAttempts+1 {
+			w.WriteHeader(503)
+			return
+		}
+		writeJSON(w, 200, map[string]string{"id": "possibly-existing-task"})
+	}))
+	defer upstream.Close()
+	s.pdf2zh = NewPdf2zhClient(upstream.URL)
+	o := paidOrderFixture(t, s, "uncertain", "", 0)
+	for i := 0; i < maxPaidAttempts+1; i++ {
+		if _, err := s.startPaidOrder(context.Background(), o.ID); err == nil {
+			t.Fatal("expected uncertain error")
+		}
+	}
+	current, _ := s.pay.store.get(o.ID)
+	if current.Attempts != 0 || current.Delivery != "" {
+		t.Fatal("uncertain task abandoned", current)
+	}
+	id, err := s.startPaidOrder(context.Background(), o.ID)
+	if err != nil || id != "possibly-existing-task" {
+		t.Fatal(id, err)
+	}
+	for _, key := range keys {
+		if key != "virtualpay:uncertain" {
+			t.Fatal("new task key after uncertain result", keys)
+		}
+	}
+}
+
+func TestFailedPointsUpgradeReplacementCanUpdate(t *testing.T) {
+	s := testPayServer(t)
+	old := PayOrder{ID: "failed-upgrade", OpenID: "owner", State: "paid", Engine: "Bing", CreditPages: 2, CreditPoints: 20, UpgradeFrom: "historical", TrialCredit: 3}
+	if err := s.pay.store.add(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pay.store.update(old.ID, func(o *PayOrder) error { o.Delivery = "failed"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	replacement := PayOrder{ID: "replacement", OpenID: "owner", State: "pending", Engine: "Bing", UpgradeFrom: "historical", TrialCredit: 3}
+	if err := s.pay.store.addPurchase(&replacement, 2, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "", "") }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pay.store.update(replacement.ID, func(o *PayOrder) error { o.State = "submitted"; o.TaskID = "replacement-task"; return nil }); err != nil {
+		t.Fatal("released upgrade blocked replacement", err)
+	}
+	if err := s.pay.store.update(replacement.ID, func(o *PayOrder) error { o.Delivery = "archived"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+}

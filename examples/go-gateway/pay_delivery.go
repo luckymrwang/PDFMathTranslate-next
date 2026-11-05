@@ -140,7 +140,7 @@ func (s *Server) nextPaidAttempt(id string) error {
 		return err
 	}
 	if order, _ := s.pay.store.get(id); order.Delivery == "failed" {
-		log.Printf("paid translation failed after %d attempts, manual refund required (order=%s)", maxPaidAttempts, id)
+		log.Printf("paid translation failed after %d attempts; settlement recorded (order=%s)", maxPaidAttempts, id)
 		return errPaidFailed
 	}
 	return nil
@@ -158,11 +158,17 @@ func (s *Server) failPaidOrder(id, reason string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("paid translation cannot succeed (%s), manual refund required (order=%s)", reason, id)
+	log.Printf("paid translation cannot succeed (%s); settlement recorded (order=%s)", reason, id)
 	return errPaidFailed
 }
 
 func paidFailureMessage(order PayOrder) string {
+	if order.Total == 0 && order.CreditPoints > 0 && order.CreditReturned {
+		if order.FailReason == alreadyTranslated {
+			return msgAlreadyTranslated + "；本单积分已退回"
+		}
+		return "翻译失败，本单积分已退回"
+	}
 	if order.Trial {
 		if order.FailReason == alreadyTranslated {
 			return msgAlreadyTranslated

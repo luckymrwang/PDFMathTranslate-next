@@ -31,16 +31,16 @@ type PayService struct {
 
 func (s *Server) payEnabled() bool { return s.pay != nil && s.pay.cfg.Enabled }
 
-// Trial-only deployments keep paid order creation and payment callbacks disabled.
+// Points and historical orders stay available when cash payment is disabled.
 func (s *Server) ordersEnabled() bool {
-	return s.pay != nil && (s.pay.cfg.Enabled || s.pay.cfg.TrialEnabled)
+	return s.pay != nil
 }
 
 func orderView(order PayOrder) map[string]any {
 	return map[string]any{"id": order.ID, "state": order.State, "quantity": order.Quantity,
 		"pages":          order.PageCount(),
 		"document_pages": order.DocumentPages, "trial_credit_pages": order.TrialCredit, "upgrade_from": order.UpgradeFrom,
-		"credit_pages":   order.CreditPages,
+		"credit_pages": order.CreditPages, "points_covered_pages": order.CreditPages, "points_spent": order.CreditPoints,
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial}
@@ -72,11 +72,20 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 		enginePrices[engine] = p.Price
 	}
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
-	writeJSON(w, 200, map[string]any{"enabled": s.payEnabled(), "trial_enabled": true, "standard_price_fen": s.pay.cfg.StandardPrice,
+	wallet, err := s.pay.referrals.wallet(openid, time.Now())
+	if err != nil {
+		writeError(w, 500, "积分信息暂不可用")
+		return
+	}
+	config := map[string]any{"enabled": s.payEnabled(), "trial_enabled": false, "standard_price_fen": s.pay.cfg.StandardPrice,
 		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices,
 		"ios_unit_fen": s.pay.cfg.IOSUnit, "ios_min_fen": iosMinFen,
-		"trial_available": !s.pay.store.hasTrial(openid), "trial_pages": trialPages, "trial_engine": trialEngine,
-		"credit_pages": s.pay.referrals.credit(openid)})
+		"trial_available": false, "trial_pages": trialPages, "trial_engine": trialEngine,
+		"credit_pages": s.pay.referrals.credit(openid) / pointsPerPage}
+	for key, value := range wallet {
+		config[key] = value
+	}
+	writeJSON(w, 200, config)
 }
 
 // uploadFile is also used for server-side PDF inspection. Never send local
@@ -142,7 +151,10 @@ func (s *Server) uploadFile(ctx context.Context, endpoint, path, name string, pa
 		}
 	}
 	if resp.StatusCode != 200 {
-		return nil, errors.New("python rejected PDF or translation settings")
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return nil, fmt.Errorf("%w: python rejected PDF or translation settings", errSubmitRejected)
+		}
+		return nil, errors.New("python service response uncertain")
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
@@ -152,16 +164,11 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method not allowed")
 		return
 	}
-	if !s.payEnabled() {
-		writeError(w, 503, "虚拟支付尚未配置")
+	if !s.ordersEnabled() {
+		writeError(w, 503, "订单服务暂未开放")
 		return
 	}
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	sessionKey := s.pay.sessions.get(token)
-	if sessionKey == "" {
-		writeError(w, 401, "请重新登录后支付")
-		return
-	}
+	sessionKey := s.pay.sessions.get(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
 	if s.pay.store.recentOrderCount(openid) >= 10 {
 		w.Header().Set("Retry-After", "60")
@@ -195,9 +202,14 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		LangIn   string `json:"lang_in"`
 		LangOut  string `json:"lang_out"`
 		Platform string `json:"platform"`
+		Trial    bool   `json:"trial"`
 	}
 	if json.Unmarshal([]byte(r.FormValue("data")), &data) != nil {
 		writeError(w, 400, "invalid settings")
+		return
+	}
+	if data.Trial {
+		writeError(w, 400, "免费试译已停用，请使用积分翻译")
 		return
 	}
 	if _, ok := availableEngines()[data.Engine]; !ok {
@@ -249,31 +261,27 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 422, "PDF 无法读取或翻译引擎暂不可用，请检查文件及引擎配置")
 		return
 	}
-	// The client platform only decides rounding up; claiming iOS can never lower the price.
-	product, unit, quantity, total := s.pay.cfg.orderAmounts(data.Engine, inspected.Pages, data.Platform == "ios")
-	if total > 10000000 {
-		writeError(w, 400, "订单金额超过限额")
-		return
-	}
 	id, err := newTradeNo()
 	if err != nil {
 		writeError(w, 500, "无法创建订单")
 		return
 	}
-	order := PayOrder{ID: id, OpenID: openid, ProductID: product, UnitPrice: unit,
-		Pages: inspected.Pages, Quantity: quantity, Total: total, Engine: data.Engine,
+	order := PayOrder{ID: id, OpenID: openid,
+		Pages: inspected.Pages, Engine: data.Engine,
 		LangIn: data.LangIn, LangOut: data.LangOut, FilePath: stagedPath,
 		FileHash: hex.EncodeToString(hash.Sum(nil)), Name: filepath.Base(header.Filename),
 		State: "pending", CreatedAt: time.Now().Unix(), Attach: id}
-	signData, _ := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID,
-		"buyQuantity": order.Quantity, "env": 0, "currencyType": "CNY",
-		"productId": order.ProductID, "goodsPrice": order.UnitPrice, "outTradeNo": id, "attach": order.Attach})
-	order.SignData = string(signData)
-	if err := s.pay.store.add(order); err != nil {
-		writeError(w, 500, "订单保存失败")
+	if err := s.pay.store.addPurchase(&order, inspected.Pages, func(o *PayOrder, remaining int) error {
+		return s.pricePurchase(o, remaining, data.Platform, sessionKey)
+	}); err != nil {
+		writePurchaseError(w, err)
 		return
 	}
 	saved = true
+	if order.Total == 0 {
+		writeJSON(w, 200, map[string]any{"order": orderView(order)})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"order": orderView(order), "payData": paymentData(order, s.pay.cfg.AppKey, sessionKey)})
 }
 
@@ -312,7 +320,7 @@ func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "订单不存在")
 		return
 	}
-	if !order.Trial && !s.payEnabled() {
+	if !order.Trial && order.Total > 0 && !s.payEnabled() {
 		writeError(w, 503, "付费翻译暂未开放")
 		return
 	}
@@ -373,7 +381,7 @@ func (s *Server) handlePayQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "订单不存在")
 		return
 	}
-	if !order.Trial && !s.payEnabled() {
+	if !order.Trial && order.Total > 0 && !s.payEnabled() {
 		writeError(w, 503, "付费翻译暂未开放")
 		return
 	}
@@ -476,7 +484,7 @@ func (s *Server) reconcileOrder(ctx context.Context, id string) error {
 	if !ok {
 		return errors.New("order not found")
 	}
-	if order.Trial {
+	if order.Trial || (order.Total == 0 && order.CreditPoints > 0) {
 		return nil
 	}
 	verified, err := s.pay.client.query(ctx, order)
@@ -519,6 +527,8 @@ func (s *Server) reconcileOrder(ctx context.Context, id string) error {
 	return nil
 }
 
+var errSubmitRejected = errors.New("translation submission rejected")
+
 func (s *Server) startPaidOrder(ctx context.Context, id string) (string, error) {
 	unlock, _ := s.pay.locks.acquire(id, true)
 	defer unlock()
@@ -529,7 +539,7 @@ func (s *Server) startPaidOrder(ctx context.Context, id string) (string, error) 
 func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, error) {
 	for {
 		order, ok := s.pay.store.get(id)
-		if !ok || (order.State != "paid" && order.State != "submitted") {
+		if !ok || order.CreditReturned || (order.State != "paid" && order.State != "submitted") {
 			return "", errors.New("unpaid order")
 		}
 		if order.Delivery == "failed" {
@@ -550,6 +560,15 @@ func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, e
 			}
 			continue
 		}
+		if errors.Is(err, errSubmitRejected) {
+			// A confirmed rejection/local preflight failure created no task. Bound retries
+			// with the same attempt budget as lost worker tasks, without a tight retry loop.
+			if retryErr := s.nextPaidAttempt(order.ID); retryErr != nil {
+				return "", retryErr
+			}
+		}
+		// Transport errors, 5xx responses, malformed success and persistence failures
+		// may hide a live task. Preserve its key until the worker resolves the outcome.
 		return taskID, err
 	}
 }
@@ -557,17 +576,17 @@ func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, e
 func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, error) {
 	settings, ok := availableEngines()[order.Engine]
 	if !ok {
-		return "", errors.New("engine unavailable")
+		return "", fmt.Errorf("%w: engine unavailable", errSubmitRejected)
 	}
 	file, err := os.Open(order.FilePath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: source unavailable", errSubmitRejected)
 	}
 	hash := sha256.New()
 	_, err = io.Copy(hash, file)
 	file.Close()
 	if err != nil || hex.EncodeToString(hash.Sum(nil)) != order.FileHash {
-		return "", errors.New("order file changed")
+		return "", fmt.Errorf("%w: order file changed", errSubmitRejected)
 	}
 	key := "virtualpay:" + order.ID
 	if order.Attempts > 0 {
@@ -620,7 +639,7 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 		queryWeChat := round%5 == 0
 		round++
 		for _, order := range s.pay.store.all() {
-			if !order.Trial && !s.payEnabled() {
+			if !order.Trial && order.Total > 0 && !s.payEnabled() {
 				continue
 			}
 			if ctx.Err() != nil {
@@ -703,5 +722,40 @@ func (s *Server) resumePaid(id string) {
 	defer cancel()
 	if _, err := s.startPaidOrder(ctx, id); err != nil {
 		log.Printf("paid translation submission failed (order=%s)", id)
+	}
+}
+
+var errCashDisabled = errors.New("付费翻译暂未开放，积分不足以抵扣全文")
+var errPaymentSession = errors.New("请重新登录后支付")
+
+func (s *Server) pricePurchase(o *PayOrder, remaining int, platform, session string) error {
+	if remaining == 0 {
+		o.State, o.Provided = "paid", true
+		return nil
+	}
+	if !s.payEnabled() {
+		return errCashDisabled
+	}
+	if session == "" {
+		return errPaymentSession
+	}
+	o.ProductID, o.UnitPrice, o.Quantity, o.Total = s.pay.cfg.orderAmounts(o.Engine, remaining, platform == "ios")
+	if o.Total > 10000000 {
+		return errOrderAmountLimit
+	}
+	raw, err := json.Marshal(map[string]any{"offerId": s.pay.cfg.OfferID, "buyQuantity": o.Quantity, "env": 0, "currencyType": "CNY", "productId": o.ProductID, "goodsPrice": o.UnitPrice, "outTradeNo": o.ID, "attach": o.Attach})
+	o.SignData = string(raw)
+	return err
+}
+func writePurchaseError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errCashDisabled):
+		writeError(w, 503, err.Error())
+	case errors.Is(err, errPaymentSession):
+		writeError(w, 401, err.Error())
+	case errors.Is(err, errOrderAmountLimit):
+		writeError(w, 400, err.Error())
+	default:
+		writeError(w, 500, "订单保存失败")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 func legacyJSON(t *testing.T, dir, name string, value any) {
@@ -40,13 +41,14 @@ func TestSQLiteMigrationPreservesRecordsAndImportsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	order.CreditPoints = 20
 	got, _ := store.get(order.ID)
 	if !reflect.DeepEqual(got, order) {
 		t.Fatal(got)
 	}
 	refs := &ReferralStore{db: store.db}
 	user, err := refs.view("owner")
-	if err != nil || user.Credit != 7 || len(user.Rewarded) != 1 || refs.inviter("ABCDEFGH", "another") != "owner" {
+	if err != nil || user.Credit != 70 || len(user.Rewarded) != 1 || refs.inviter("ABCDEFGH", "another") != "owner" {
 		t.Fatal(user, err)
 	}
 	if err := store.update(order.ID, func(o *PayOrder) error { o.Provided = false; return nil }); err != nil {
@@ -116,14 +118,14 @@ func TestSQLiteMigrationRepairsLegacyPartialReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	order, _ := store.get("returned")
-	if !order.CreditReturned || (&ReferralStore{db: store.db}).credit("owner") != 5 {
+	if !order.CreditReturned || (&ReferralStore{db: store.db}).credit("owner") != 50 {
 		t.Fatal(order)
 	}
 }
 
 func TestSQLitePurchaseRollbackAndConcurrentReservations(t *testing.T) {
 	s := testPayServer(t)
-	if err := s.pay.referrals.restore("owner", 5); err != nil {
+	if err := s.pay.referrals.restore("owner", 50); err != nil {
 		t.Fatal(err)
 	}
 	price := func(o *PayOrder, n int) error { o.Quantity = n; o.Total = n * 10; return nil }
@@ -135,11 +137,11 @@ func TestSQLitePurchaseRollbackAndConcurrentReservations(t *testing.T) {
 	if err := s.pay.store.addPurchase(&order, 3, price); err == nil {
 		t.Fatal("accepted failed insert")
 	}
-	if s.pay.referrals.credit("owner") != 5 || len(s.pay.store.all()) != 0 || order.CreditPages != 0 {
+	if s.pay.referrals.credit("owner") != 50 || len(s.pay.store.all()) != 0 || order.CreditPages != 0 {
 		t.Fatal("debit survived failure")
 	}
 	s.pay.store.db.Exec("DROP TRIGGER fail_insert")
-	if err := s.pay.store.addPurchase(&order, 3, func(*PayOrder, int) error { return errors.New("price failed") }); err == nil || s.pay.referrals.credit("owner") != 5 {
+	if err := s.pay.store.addPurchase(&order, 3, func(*PayOrder, int) error { return errors.New("price failed") }); err == nil || s.pay.referrals.credit("owner") != 50 {
 		t.Fatal("price failure not rolled back")
 	}
 	var wg sync.WaitGroup
@@ -166,7 +168,7 @@ func TestSQLitePurchaseRollbackAndConcurrentReservations(t *testing.T) {
 // A deferred foreign-key violation fails COMMIT after all statements succeed.
 func TestSQLiteCommitFailureLeavesOrderAndBalanceUnchanged(t *testing.T) {
 	s := testPayServer(t)
-	if err := s.pay.referrals.restore("owner", 5); err != nil {
+	if err := s.pay.referrals.restore("owner", 50); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.pay.store.db.Exec(`CREATE TABLE commit_parent(id INTEGER PRIMARY KEY);
@@ -180,7 +182,7 @@ func TestSQLiteCommitFailureLeavesOrderAndBalanceUnchanged(t *testing.T) {
 	if err == nil {
 		t.Fatal("commit unexpectedly succeeded")
 	}
-	if s.pay.referrals.credit("owner") != 5 || len(s.pay.store.all()) != 0 || order.CreditPages != 0 {
+	if s.pay.referrals.credit("owner") != 50 || len(s.pay.store.all()) != 0 || order.CreditPages != 0 {
 		t.Fatal("failed commit published data")
 	}
 	var count int
@@ -189,40 +191,17 @@ func TestSQLiteCommitFailureLeavesOrderAndBalanceUnchanged(t *testing.T) {
 	}
 }
 
-func TestSQLiteRewardFailureRollsBackDeliveryAndRetriesOnce(t *testing.T) {
+func TestHistoricalArchivedTrialNoLongerRewards(t *testing.T) {
 	s := testPayServer(t)
-	order := PayOrder{ID: "trial", OpenID: "friend", Trial: true, ReferredBy: "inviter", State: "submitted"}
+	order := PayOrder{ID: "old", OpenID: "friend", Trial: true, ReferredBy: "inviter", State: "submitted"}
 	if err := s.pay.store.add(order); err != nil {
 		t.Fatal(err)
 	}
-	s.pay.store.db.Exec(`CREATE TRIGGER fail_reward BEFORE UPDATE ON referral_users BEGIN SELECT RAISE(ABORT,'injected'); END`)
-	deliver := func(o *PayOrder) error { o.Delivery = "archived"; return nil }
-	if err := s.pay.store.update(order.ID, deliver); err == nil {
-		t.Fatal("accepted failed reward")
+	if err := s.pay.store.update(order.ID, func(o *PayOrder) error { o.Delivery = "archived"; return nil }); err != nil {
+		t.Fatal(err)
 	}
-	got, _ := s.pay.store.get(order.ID)
-	if got.Delivery != "" {
-		t.Fatal(got)
-	}
-	var count int
-	s.pay.store.db.QueryRow("SELECT count(*) FROM referral_rewards").Scan(&count)
-	if count != 0 || s.pay.referrals.credit("inviter") != 0 {
-		t.Fatal("partial reward")
-	}
-	s.pay.store.db.Exec("DROP TRIGGER fail_reward")
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := s.pay.store.update(order.ID, deliver); err != nil {
-				t.Error(err)
-			}
-		}()
-	}
-	wg.Wait()
-	if s.pay.referrals.credit("inviter") != 5 {
-		t.Fatal("reward not exactly once")
+	if s.pay.referrals.credit("inviter") != 0 {
+		t.Fatal("historical trial rewarded")
 	}
 }
 
@@ -295,7 +274,7 @@ func TestSQLiteInvitationLookupFailureDoesNotConsumeTrial(t *testing.T) {
 	}
 	current, _ = s.pay.store.get(order.ID)
 	s.settleReferrals(current)
-	if s.pay.referrals.credit("inviter") != 5 {
+	if s.pay.referrals.credit("inviter") != 0 {
 		t.Fatal("incorrect balance")
 	}
 }
@@ -313,5 +292,59 @@ func TestSQLiteReplacementConnectionKeepsPragmas(t *testing.T) {
 		if err := s.pay.store.db.QueryRow("PRAGMA " + name).Scan(&got); err != nil || got != want {
 			t.Fatal(name, got, err)
 		}
+	}
+}
+
+func TestVersionOnePointsMigrationSeedsOldUsers(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openDatabase(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`UPDATE metadata SET value='1' WHERE key='json_imported';
+ INSERT INTO referral_users(openid,code,credit) VALUES('host','ABCDEFGH',7);
+ INSERT INTO referral_rewards(inviter,invitee) VALUES('host','friend');
+ INSERT INTO orders(id,record) VALUES('old','{"ID":"old","OpenID":"buyer","CreditPages":3,"State":"pending"}');
+ DELETE FROM points_logins; PRAGMA user_version=1;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	store, err := openOrderStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := &ReferralStore{db: store.db}
+	for _, owner := range []string{"host", "friend", "buyer"} {
+		if err := refs.login(owner, "ABCDEFGH", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if refs.credit("host") != 70 || refs.credit("friend") != 0 {
+		t.Fatal("old users rewarded or conversion wrong")
+	}
+	o, _ := store.get("old")
+	if o.CreditPoints != 30 {
+		t.Fatal(o)
+	}
+	store.db.Close()
+	store, err = openOrderStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	refs = &ReferralStore{db: store.db}
+	if refs.credit("host") != 70 {
+		t.Fatal("conversion repeated")
+	}
+	var version int
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+		t.Fatal("version marker regressed", version, err)
+	}
+	if err := store.update("old", func(o *PayOrder) error { o.State = "closed"; o.PaymentClosed = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if refs.credit("buyer") != 30 {
+		t.Fatal("reserved migration return")
 	}
 }
