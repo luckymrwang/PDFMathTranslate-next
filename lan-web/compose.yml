@@ -1,0 +1,28 @@
+# Intranet web edition: one container, http://<host>:${WEB_PORT:-8080}
+#   docker compose -f lan-web/compose.yml up -d --build
+# Engine keys / access password go in lan-web/lan.env (copy lan.env.example).
+# Bing works with no keys at all.
+
+name: pdfmath-web
+
+services:
+  pdf2zh-web:
+    build:
+      context: ..
+      dockerfile: lan-web/Dockerfile
+    image: pdf2zh-web:latest
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    env_file:
+      - path: lan.env
+        required: false
+    environment:
+      LAN_DATA_DIR: /data
+    volumes:
+      - model-config:/data
+    platform: linux/amd64   # the base API image is amd64 only
+
+volumes:
+  model-config:

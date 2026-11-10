@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 文档翻译</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2300896f'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'>译</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <span class="logo">译</span>
+    <div class="brand"><h1>PDF 文档翻译</h1><p>论文 · 合同 · 说明书 · 保留排版 · 公式不乱 · 双语对照</p></div>
+  </div>
+</header>
+
+<main class="container">
+  <!-- Access password (only shown when the server sets LAN_PASSWORD) -->
+  <section id="login" class="card hidden">
+    <h2>登录</h2>
+    <form id="login-form" class="login-form">
+      <label for="login-username">用户名</label>
+      <input id="login-username" type="text" autocomplete="username" required>
+      <label for="login-password">密码</label>
+      <input id="login-password" type="password" autocomplete="current-password" required>
+      <button class="btn primary" type="submit">登录</button>
+    </form>
+    <p id="login-error" class="error"></p>
+  </section>
+
+  <div id="app" class="hidden">
+    <section class="card model-card">
+      <div class="row between"><div><h2>AI 模型配置</h2><p class="hint">使用内网部署的 OpenAI 兼容接口翻译</p></div><button id="logout" class="btn link small" type="button">退出登录</button></div>
+      <form id="model-form">
+        <div class="field"><label for="model-url">接口地址（Base URL）</label><input id="model-url" type="url" placeholder="http://10.0.0.1:8000/v1" required></div>
+        <div class="field"><label for="model-name">模型名称</label><input id="model-name" type="text" placeholder="例如 Qwen3" required></div>
+        <div class="field"><label for="model-key">API Key</label><input id="model-key" type="password" autocomplete="off" placeholder="输入 API Key"><p id="model-key-hint" class="hint">密钥仅保存在服务器。</p></div>
+        <p id="model-error" class="error"></p>
+        <button id="model-save" class="btn primary" type="submit">保存模型配置</button>
+      </form>
+    </section>
+    <!-- Step 1: choose a file and settings -->
+    <section id="form-card" class="card">
+      <label id="dropzone" class="dropzone" for="file-input">
+        <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+        <div id="drop-empty" class="drop-empty">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+          <strong>点击选择，或把 PDF 拖到这里</strong>
+          <span>最大 30 MB</span>
+        </div>
+        <div id="drop-file" class="drop-file hidden">
+          <span class="badge">PDF</span>
+          <div class="file-info"><strong id="file-name"></strong><span id="file-size"></span></div>
+          <button type="button" id="file-remove" class="icon-btn" aria-label="移除文件">×</button>
+        </div>
+      </label>
+
+      <div class="settings">
+        <div class="field">
+          <label for="lang-in">源语言</label>
+          <select id="lang-in"></select>
+        </div>
+        <button type="button" id="swap" class="icon-btn swap" aria-label="交换语言" title="交换语言">⇄</button>
+        <div class="field">
+          <label for="lang-out">目标语言</label>
+          <select id="lang-out"></select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="engine">翻译引擎</label>
+        <select id="engine"></select>
+        <p class="hint" id="engine-hint"></p>
+      </div>
+
+      <p id="form-error" class="error"></p>
+      <button id="submit" class="btn primary block" type="button" disabled>开始翻译</button>
+    </section>
+
+    <!-- Step 2: progress -->
+    <section id="progress-card" class="card hidden">
+      <div class="progress-head">
+        <div><h2 id="progress-title">正在翻译</h2><p id="progress-file" class="muted"></p></div>
+        <span id="progress-percent" class="percent">0%</span>
+      </div>
+      <div class="track"><div id="progress-fill" class="fill"></div></div>
+      <p id="progress-detail" class="muted"></p>
+      <p id="progress-error" class="error"></p>
+      <div class="row">
+        <button id="cancel" class="btn" type="button">取消翻译</button>
+        <button id="back-from-progress" class="btn hidden" type="button">返回</button>
+      </div>
+    </section>
+
+    <!-- Step 3: result -->
+    <section id="result-card" class="card hidden">
+      <div class="done-mark">✓</div>
+      <h2>译文已就绪</h2>
+      <p id="result-file" class="muted"></p>
+      <div class="result-actions">
+        <button class="btn primary" data-open="dual" type="button">在线查看双语对照</button>
+        <button class="btn" data-download="dual" type="button">下载双语 PDF</button>
+        <button class="btn" data-open="mono" data-needs="mono" type="button">在线查看纯译文</button>
+        <button class="btn" data-download="mono" data-needs="mono" type="button">下载纯译文 PDF</button>
+      </div>
+      <button id="new-task" class="btn link" type="button">翻译另一个文件</button>
+    </section>
+
+    <!-- History (stored in this browser only) -->
+    <section id="history-card" class="card hidden">
+      <div class="row between"><h2>最近翻译</h2><button id="history-clear" class="btn link small" type="button">清空记录</button></div>
+      <ul id="history-list" class="history"></ul>
+      <p class="hint">记录仅保存在本浏览器；译文保存在服务器，容器重启后会被清除，请及时下载。</p>
+    </section>
+  </div>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

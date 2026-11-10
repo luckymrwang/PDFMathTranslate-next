@@ -174,3 +174,8 @@ cython_debug/
 .idea/
 .vscode
 .DS_Store
+
+# Secrets / production data must never enter a build context
+lan-web/lan.env
+examples/go-gateway/.env
+examples/go-gateway/data

@@ -180,3 +180,6 @@ CLAUDE.md
 examples/go-gateway/go-gateway
 examples/go-gateway/go-gateway.new
 deploy/dev/logs/
+
+# Intranet web edition secrets
+lan-web/lan.env
