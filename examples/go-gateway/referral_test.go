@@ -235,13 +235,16 @@ func TestPointsLoginDailyCapAndChinaDay(t *testing.T) {
 		t.Fatal(n, err)
 	}
 	tomorrow := now.Add(2 * time.Minute)
+	if _, err := s.pay.referrals.reserve("host", 100); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := s.pay.referrals.claim("host", tomorrow); n != 100 || err != nil {
 		t.Fatal(n, err)
 	}
 	if err := s.pay.referrals.login("friend0", inviter.Code, tomorrow); err != nil {
 		t.Fatal(err)
 	}
-	if s.pay.referrals.credit("host") != 600 {
+	if s.pay.referrals.credit("host") != 500 {
 		t.Fatal("capped event replayed tomorrow")
 	}
 	if s.pay.referrals.credit("friend9") != 100 {
@@ -408,5 +411,49 @@ func TestBothPurchaseRoutesPointsWithoutPaymentSession(t *testing.T) {
 				t.Fatal(q.Code, q.Body.String())
 			}
 		})
+	}
+}
+
+func TestPointsBalanceCapAndFullClaimRetry(t *testing.T) {
+	s := testPayServer(t)
+	r := s.pay.referrals
+	now := time.Now()
+	if err := r.restore("owner", 580); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.claim("owner", now); err != nil || n != 0 || r.credit("owner") != 580 {
+		t.Fatalf("existing balance: %d %v", n, err)
+	}
+	if _, err := r.reserve("owner", 130); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.claim("owner", now); err != nil || n != 50 || r.credit("owner") != 500 {
+		t.Fatalf("partial claim: %d %v", n, err)
+	}
+	if n, err := r.claim("owner", now); err != nil || n != 0 {
+		t.Fatalf("duplicate claim: %d %v", n, err)
+	}
+	host, err := r.view("owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.login("friend-cap", host.Code, now); err != nil {
+		t.Fatal(err)
+	}
+	if r.credit("owner") != 500 || r.credit("friend-cap") != 100 {
+		t.Fatal("invitation cap")
+	}
+	if _, err := r.reserve("owner", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.login("friend-cap", host.Code, now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if r.credit("owner") != 400 {
+		t.Fatal("capped invitation replayed")
+	}
+	wallet, err := r.wallet("owner", now)
+	if err != nil || wallet["points_balance_limit"] != 500 {
+		t.Fatal(wallet, err)
 	}
 }

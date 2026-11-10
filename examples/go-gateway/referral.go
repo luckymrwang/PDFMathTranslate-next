@@ -209,6 +209,7 @@ func logReferral(action, orderID string, err error) {
 
 const pointsPerPage = 10
 const dailyPointsLimit = 500
+const pointsBalanceLimit = 500
 const pointsReward = 100
 
 // enginePointsPerPage lists the engines whose pages points can redeem and the
@@ -241,8 +242,13 @@ func migratePoints(tx *databaseTx) error {
 
 // Every earning event is recorded even if capped, so it cannot be replayed tomorrow.
 func earnPointsTx(tx *databaseTx, owner, event, day, kind string, claim bool) (int, error) {
-	if _, err := referralUserTx(tx, owner); err != nil {
+	user, err := referralUserTx(tx, owner)
+	if err != nil {
 		return 0, err
+	}
+	// A full wallet does not consume the daily claim; invite events remain final.
+	if claim && user.Credit >= pointsBalanceLimit {
+		return 0, nil
 	}
 	if _, err := tx.Exec("INSERT OR IGNORE INTO points_daily(openid,day) VALUES(?,?)", owner, day); err != nil {
 		return 0, err
@@ -251,7 +257,7 @@ func earnPointsTx(tx *databaseTx, owner, event, day, kind string, claim bool) (i
 	if err := tx.QueryRow("SELECT earned FROM points_daily WHERE openid=? AND day=?", owner, day).Scan(&earned); err != nil {
 		return 0, err
 	}
-	awarded := min(pointsReward, max(0, dailyPointsLimit-earned))
+	awarded := min(pointsReward, min(max(0, dailyPointsLimit-earned), max(0, pointsBalanceLimit-user.Credit)))
 	result, err := tx.Exec("INSERT OR IGNORE INTO points_ledger(event_key,openid,delta,day,kind) VALUES(?,?,?,?,?)", event, owner, awarded, day, kind)
 	if err != nil {
 		return 0, err
@@ -335,7 +341,7 @@ func (s *ReferralStore) wallet(owner string, now time.Time) (map[string]any, err
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	return map[string]any{"points_balance": balance, "daily_earned": earned, "daily_limit": dailyPointsLimit, "daily_claimed": claimed != 0, "daily_reward": pointsReward, "reward_points": pointsReward, "points_per_page": pointsPerPage, "engine_points_per_page": enginePointsPerPage, "points_enabled": true}, tx.Commit()
+	return map[string]any{"points_balance": balance, "points_balance_limit": pointsBalanceLimit, "daily_earned": earned, "daily_limit": dailyPointsLimit, "daily_claimed": claimed != 0, "daily_reward": pointsReward, "reward_points": pointsReward, "points_per_page": pointsPerPage, "engine_points_per_page": enginePointsPerPage, "points_enabled": true}, tx.Commit()
 }
 func (s *Server) handlePointsClaim(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
