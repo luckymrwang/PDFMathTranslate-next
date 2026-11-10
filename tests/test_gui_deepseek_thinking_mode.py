@@ -476,3 +476,22 @@ def test_deepseek_thinking_mode_rejects_unknown_value():
         assert str(exc) == "DeepSeek thinking mode must be enabled or disabled"
     else:
         raise AssertionError("Expected unknown thinking mode to fail")
+
+
+def test_deepseek_base_url_overrides_default_and_is_cleaned():
+    settings = DeepSeekSettings(
+        deepseek_api_key="sk-test",
+        deepseek_model="deepseek-flash",
+        deepseek_base_url="https://proxy.example.com/v1/",
+    )
+    settings.validate_settings()
+    transformed = settings.transform()
+    assert transformed.openai_base_url == "https://proxy.example.com/v1"
+
+
+def test_deepseek_base_url_defaults_to_official_endpoint():
+    settings = DeepSeekSettings(
+        deepseek_api_key="sk-test", deepseek_model="deepseek-flash"
+    )
+    settings.validate_settings()
+    assert settings.transform().openai_base_url == "https://api.deepseek.com/v1"
