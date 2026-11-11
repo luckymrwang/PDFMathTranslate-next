@@ -15,10 +15,23 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - name: Build and push pdf2zh
+        id: pdf2zh
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: luckymrwang/pdf2zh:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build and push pdf2zh-web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: lan-web/Dockerfile
+          platforms: linux/amd64
+          build-args: BASE_IMAGE=luckymrwang/pdf2zh@${{ steps.pdf2zh.outputs.digest }}
+          push: true
+          tags: luckymrwang/pdf2zh-web:latest
+          cache-from: type=gha,scope=pdf2zh-web
+          cache-to: type=gha,mode=max,scope=pdf2zh-web
