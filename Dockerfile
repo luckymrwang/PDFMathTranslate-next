@@ -20,7 +20,8 @@ RUN apt-get update && \
      rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
-RUN uv pip install --system --no-cache -r pyproject.toml && babeldoc --version && babeldoc --warmup
+# BabelDOC 0.6 imports BitStream, which bitstring 5 removed.
+RUN uv pip install --system --no-cache -r pyproject.toml "bitstring<5" && babeldoc --version && babeldoc --warmup
 
 COPY . .
 
