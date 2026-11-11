@@ -15,6 +15,8 @@ ARG BASE_IMAGE=luckymrwang/pdf2zh:latest
 
 ########## Stage 1: Go gateway ##########
 FROM golang:1.24-alpine AS gateway
+ARG GOPROXY
+RUN if [ -n "$GOPROXY" ]; then go env -w GOPROXY="$GOPROXY"; fi
 WORKDIR /src
 # Copy selectively: examples/go-gateway/.env and data/ hold production secrets
 # and orders and must never enter an image layer.

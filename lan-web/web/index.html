@@ -31,14 +31,20 @@
 
   <div id="app" class="hidden">
     <section class="card model-card">
-      <div class="row between"><div><h2>AI 模型配置</h2><p class="hint">使用内网部署的 OpenAI 兼容接口翻译</p></div><button id="logout" class="btn link small" type="button">退出登录</button></div>
+      <div class="row between"><h2>AI 模型配置</h2><button id="logout" class="btn link small" type="button">退出登录</button></div>
+      <details id="model-details">
+      <summary>管理模型配置 <span class="hint">添加或修改 OpenAI 兼容接口</span></summary>
+      <div class="field"><label for="model-select">选择配置</label><select id="model-select"></select></div>
+      <button id="model-new" class="btn" type="button">新增配置</button>
       <form id="model-form">
+        <div class="field"><label for="model-label">配置名称</label><input id="model-label" type="text" placeholder="例如 内网模型" required></div>
         <div class="field"><label for="model-url">接口地址（Base URL）</label><input id="model-url" type="url" placeholder="http://10.0.0.1:8000/v1" required></div>
         <div class="field"><label for="model-name">模型名称</label><input id="model-name" type="text" placeholder="例如 Qwen3" required></div>
         <div class="field"><label for="model-key">API Key</label><input id="model-key" type="password" autocomplete="off" placeholder="输入 API Key"><p id="model-key-hint" class="hint">密钥仅保存在服务器。</p></div>
         <p id="model-error" class="error"></p>
         <button id="model-save" class="btn primary" type="submit">保存模型配置</button>
       </form>
+      </details>
     </section>
     <!-- Step 1: choose a file and settings -->
     <section id="form-card" class="card">

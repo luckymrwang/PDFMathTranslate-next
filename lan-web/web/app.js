@@ -91,15 +91,26 @@
     return body.error || fallback + '：' + res.status
   }
 
-  async function loadModelConfig() {
-    const res = await authFetch('/api/model-config')
-    if (!res.ok) throw new Error(await errorOf(res, '读取模型配置失败'))
-    const config = await res.json()
+  let modelConfigs = []
+  function editModel(id) {
+    const config = modelConfigs.find(c => c.id === id) || {}
+    $('model-select').value = config.id || ''
+    $('model-label').value = config.label || ''
     $('model-url').value = config.base_url || ''
     $('model-name').value = config.model || ''
     $('model-key').value = ''
     $('model-key').placeholder = config.has_api_key ? '已设置，留空保持不变' : '输入 API Key'
     $('model-key-hint').textContent = config.has_api_key ? '密钥已保存，留空不会修改。' : '密钥仅保存在服务器。'
+    $('model-error').textContent = ''
+  }
+  async function loadModelConfig(selected) {
+    const res = await authFetch('/api/model-config')
+    if (!res.ok) throw new Error(await errorOf(res, '读取模型配置失败'))
+    const data = await res.json()
+    modelConfigs = data.configs || []
+    fillSelect($('model-select'), [{ value: '', label: '新配置' }, ...modelConfigs.map(c => ({ value: c.id, label: c.label }))], selected || modelConfigs[0]?.id || '')
+    editModel($('model-select').value)
+    if (!modelConfigs.length) $('model-details').open = true
   }
 
   async function saveModelConfig(e) {
@@ -109,11 +120,13 @@
     try {
       const res = await authFetch('/api/model-config', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base_url: $('model-url').value.trim(), model: $('model-name').value.trim(), api_key: $('model-key').value }),
+        body: JSON.stringify({ id: $('model-select').value, label: $('model-label').value.trim(), base_url: $('model-url').value.trim(), model: $('model-name').value.trim(), api_key: $('model-key').value }),
       })
       if (!res.ok) throw new Error(await errorOf(res, '保存模型配置失败'))
-      await loadModelConfig()
-      await loadEngines()
+      const saved = await res.json()
+      await loadModelConfig(saved.id)
+      await loadEngines(saved.id)
+      $('model-details').open = false
       toast('模型配置已保存')
     } catch (err) { $('model-error').textContent = err.message }
     finally { $('model-save').disabled = false }
@@ -138,7 +151,7 @@
   }
   function saveLangs() { store.set('langs', { in: $('lang-in').value, out: $('lang-out').value }) }
 
-  async function loadEngines() {
+  async function loadEngines(preferred) {
     const res = await authFetch('/api/engines')
     if (!res.ok) throw new Error(await errorOf(res, '读取翻译引擎失败'))
     const { engines } = await res.json()
@@ -146,10 +159,11 @@
     select.innerHTML = ''
     for (const name of engines) {
       const option = document.createElement('option')
-      option.value = option.textContent = name
+      option.value = name
+      option.textContent = modelConfigs.find(c => c.id === name)?.label || name
       select.appendChild(option)
     }
-    const saved = store.get('engine')
+    const saved = preferred || store.get('engine')
     if (engines.includes(saved)) select.value = saved
     updateEngineHint()
     updateSubmit()
@@ -196,7 +210,7 @@
     if (!file) return
     const task = {
       name: file.name, langIn: $('lang-in').value, langOut: $('lang-out').value,
-      engine: $('engine').value, createdAt: Date.now(), state: 'uploading',
+      engine: $('engine').value, engineLabel: $('engine').selectedOptions[0]?.textContent || '', createdAt: Date.now(), state: 'uploading',
     }
     const form = new FormData()
     form.append('file', file, file.name)
@@ -204,7 +218,7 @@
 
     showView('progress')
     show('cancel', true); show('back-from-progress', false)
-    $('progress-file').textContent = task.name + ' · ' + task.engine
+    $('progress-file').textContent = task.name + ' · ' + (task.engineLabel || task.engine)
     $('progress-error').textContent = ''
     setProgress(0, '正在上传', '上传中 0%')
 
@@ -286,7 +300,7 @@
     task.hasMono = !!st.mono_url
     saveHistory(task)
     renderHistory()
-    $('result-file').textContent = task.name + ' · ' + (LANG_LABEL[task.langIn] || task.langIn) + ' → ' + (LANG_LABEL[task.langOut] || task.langOut) + ' · ' + task.engine
+    $('result-file').textContent = task.name + ' · ' + (LANG_LABEL[task.langIn] || task.langIn) + ' → ' + (LANG_LABEL[task.langOut] || task.langOut) + ' · ' + (task.engineLabel || task.engine)
     document.querySelectorAll('[data-needs=mono]').forEach(el => el.classList.toggle('hidden', !task.hasMono))
     showView('result')
   }
@@ -370,7 +384,7 @@
       const name = document.createElement('strong'); name.textContent = task.name; name.title = task.name
       const sub = document.createElement('span')
       sub.textContent = new Date(task.createdAt).toLocaleString('zh-CN', { hour12: false }) + ' · ' +
-        (LANG_LABEL[task.langIn] || task.langIn) + ' → ' + (LANG_LABEL[task.langOut] || task.langOut) + ' · ' + task.engine
+        (LANG_LABEL[task.langIn] || task.langIn) + ' → ' + (LANG_LABEL[task.langOut] || task.langOut) + ' · ' + (task.engineLabel || task.engine)
       meta.append(name, sub)
       const status = document.createElement('span')
       status.className = 'status ' + label[1]; status.textContent = label[0]
@@ -393,7 +407,7 @@
     current = task
     showView('progress')
     show('cancel', true); show('back-from-progress', false)
-    $('progress-file').textContent = task.name + ' · ' + task.engine
+    $('progress-file').textContent = task.name + ' · ' + (task.engineLabel || task.engine)
     $('progress-error').textContent = ''
     setProgress(0, '正在翻译', '正在获取进度…')
     poll()
@@ -423,6 +437,8 @@
     document.querySelectorAll('[data-download]').forEach(el => el.addEventListener('click', () => current && downloadPdf(current, el.dataset.download)))
     $('history-clear').addEventListener('click', () => { if (confirm('清空本浏览器中的翻译记录？')) { store.set('history', []); renderHistory() } })
     $('model-form').addEventListener('submit', saveModelConfig)
+    $('model-select').addEventListener('change', e => editModel(e.target.value))
+    $('model-new').addEventListener('click', () => editModel(''))
     $('logout').addEventListener('click', () => { store.del('token'); clearTimeout(pollTimer); current = null; show('app', false); show('login', true); $('login-password').value = '' })
     $('login-form').addEventListener('submit', async e => {
       e.preventDefault()
@@ -438,8 +454,8 @@
   async function start() {
     try {
       await ensureToken()
-      await loadEngines()
       await loadModelConfig()
+      await loadEngines()
       show('login', false); show('app', true)
       renderHistory()
       // Reattach to a translation that was running when the page was closed.

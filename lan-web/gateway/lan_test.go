@@ -64,11 +64,11 @@ func TestModelConfigPersistenceAndValidation(t *testing.T) {
 			t.Fatalf("%s: %d", u, w.Code)
 		}
 	}
-	w := request("PUT", `{"base_url":"http://localhost:8000/v1","model":"m1","api_key":"secret-key"}`)
+	w := request("PUT", `{"id":"OpenAI","label":"默认","base_url":"http://localhost:8000/v1","model":"m1","api_key":"secret-key"}`)
 	if w.Code != 200 || strings.Contains(w.Body.String(), "secret-key") {
 		t.Fatal(w.Body.String())
 	}
-	w = request("PUT", `{"base_url":"http://localhost:8000/v1","model":"m2","api_key":""}`)
+	w = request("PUT", `{"id":"OpenAI","label":"默认","base_url":"http://localhost:8000/v1","model":"m2","api_key":""}`)
 	if w.Code != 200 || strings.Contains(w.Body.String(), "secret-key") {
 		t.Fatal(w.Body.String())
 	}

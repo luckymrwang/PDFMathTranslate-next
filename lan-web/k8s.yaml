@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: pdf2zh-web
-          image: 2026669.xyz:65000/luckymrwang/pdf2zh-web:lan-20261110-2
+          image: 2026669.xyz:65000/luckymrwang/pdf2zh-web:lan-20261111-3
           imagePullPolicy: IfNotPresent
           env:
             - name: LAN_DATA_DIR
