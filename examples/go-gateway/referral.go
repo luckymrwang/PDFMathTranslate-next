@@ -209,17 +209,17 @@ func logReferral(action, orderID string, err error) {
 }
 
 const pointsPerPage = 10
-const dailyPointsLimit = 500
-const pointsBalanceLimit = 500
+const dailyPointsLimit = 300
+const pointsBalanceLimit = 300
 const pointsReward = 100
 
 // dailyClaimReward is the free daily claim; invitations keep pointsReward.
-const dailyClaimReward = 50
+const dailyClaimReward = 20
 
 // Rewarded video ads add points on top of the daily claim and share its daily
 // and balance caps. WeChat offers no server-side proof that an ad was watched,
 // so the per-day count is the only limit a scripted client cannot bypass.
-const adPointsReward = 50
+const adPointsReward = 20
 const adDailyLimit = 3
 
 // enginePointsPerPage lists the engines whose pages points can redeem and the

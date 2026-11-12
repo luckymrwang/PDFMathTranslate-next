@@ -43,7 +43,34 @@ func orderView(order PayOrder) map[string]any {
 		"credit_pages": order.CreditPages, "points_covered_pages": order.CreditPages, "points_spent": order.CreditPoints,
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
-		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial}
+		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial,
+		"output": outputOrDefault(order.Output)}
+}
+
+// Result formats a client may ask for. Translation runs once either way; "both"
+// only renders and stores one more PDF, so all formats cost the same.
+var outputModes = map[string]bool{"dual": true, "mono": true, "both": true}
+
+// parseOutput validates a client's output mode; empty (older clients) means dual.
+func parseOutput(value string) (string, bool) {
+	if value == "" {
+		return "dual", true
+	}
+	return value, outputModes[value]
+}
+
+func outputOrDefault(value string) string {
+	if value == "" {
+		return "dual"
+	}
+	return value
+}
+
+// outputParams sets the pdf2zh flags that pick which PDFs are generated.
+func outputParams(params map[string]any, output string) {
+	output = outputOrDefault(output)
+	params["no_mono"] = output == "dual"
+	params["no_dual"] = output == "mono"
 }
 
 // trialPages is how many leading pages a free trial translates.
@@ -203,9 +230,15 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		LangOut  string `json:"lang_out"`
 		Platform string `json:"platform"`
 		Trial    bool   `json:"trial"`
+		Output   string `json:"output"`
 	}
 	if json.Unmarshal([]byte(r.FormValue("data")), &data) != nil {
 		writeError(w, 400, "invalid settings")
+		return
+	}
+	output, ok := parseOutput(data.Output)
+	if !ok {
+		writeError(w, 400, "输出格式无效")
 		return
 	}
 	if data.Trial {
@@ -270,7 +303,7 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		Pages: inspected.Pages, Engine: data.Engine,
 		LangIn: data.LangIn, LangOut: data.LangOut, FilePath: stagedPath,
 		FileHash: hex.EncodeToString(hash.Sum(nil)), Name: filepath.Base(header.Filename),
-		State: "pending", CreatedAt: time.Now().Unix(), Attach: id}
+		State: "pending", CreatedAt: time.Now().Unix(), Attach: id, Output: output}
 	if err := s.pay.store.addPurchase(&order, inspected.Pages, func(o *PayOrder, remaining int) error {
 		return s.pricePurchase(o, remaining, data.Platform, sessionKey)
 	}); err != nil {
@@ -596,6 +629,7 @@ func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, e
 	defer cancel()
 	params := map[string]any{"lang_in": order.LangIn, "lang_out": order.LangOut, "qps": 4,
 		"skip_image_translation": true, "translate_engine_settings": settings}
+	outputParams(params, order.Output)
 	if order.Trial {
 		pages := order.PageCount()
 		if pages < 1 || pages > trialPages {

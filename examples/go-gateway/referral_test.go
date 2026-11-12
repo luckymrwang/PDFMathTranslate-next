@@ -222,8 +222,8 @@ func TestPointsLoginDailyCapAndChinaDay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if s.pay.referrals.credit("host") != 500 {
-		t.Fatal("shared daily cap")
+	if s.pay.referrals.credit("host") != pointsBalanceLimit {
+		t.Fatal("balance cap")
 	}
 	if n, err := s.pay.referrals.claim("host", now); n != 0 || err != nil {
 		t.Fatal(n, err)
@@ -244,7 +244,7 @@ func TestPointsLoginDailyCapAndChinaDay(t *testing.T) {
 	if err := s.pay.referrals.login("friend0", inviter.Code, tomorrow); err != nil {
 		t.Fatal(err)
 	}
-	if s.pay.referrals.credit("host") != 400+dailyClaimReward {
+	if s.pay.referrals.credit("host") != pointsBalanceLimit-100+dailyClaimReward {
 		t.Fatal("capped event replayed tomorrow")
 	}
 	if s.pay.referrals.credit("friend9") != 100 {
@@ -418,16 +418,16 @@ func TestPointsBalanceCapAndFullClaimRetry(t *testing.T) {
 	s := testPayServer(t)
 	r := s.pay.referrals
 	now := time.Now()
-	if err := r.restore("owner", 580); err != nil {
+	if err := r.restore("owner", 380); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := r.claim("owner", now); err != nil || n != 0 || r.credit("owner") != 580 {
+	if n, err := r.claim("owner", now); err != nil || n != 0 || r.credit("owner") != 380 {
 		t.Fatalf("existing balance: %d %v", n, err)
 	}
-	if _, err := r.reserve("owner", 130); err != nil {
+	if _, err := r.reserve("owner", 90); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := r.claim("owner", now); err != nil || n != 50 || r.credit("owner") != 500 {
+	if n, err := r.claim("owner", now); err != nil || n != 10 || r.credit("owner") != pointsBalanceLimit {
 		t.Fatalf("partial claim: %d %v", n, err)
 	}
 	if n, err := r.claim("owner", now); err != nil || n != 0 {
@@ -440,7 +440,7 @@ func TestPointsBalanceCapAndFullClaimRetry(t *testing.T) {
 	if err := r.login("friend-cap", host.Code, now); err != nil {
 		t.Fatal(err)
 	}
-	if r.credit("owner") != 500 || r.credit("friend-cap") != 100 {
+	if r.credit("owner") != pointsBalanceLimit || r.credit("friend-cap") != 100 {
 		t.Fatal("invitation cap")
 	}
 	if _, err := r.reserve("owner", 100); err != nil {
@@ -449,11 +449,11 @@ func TestPointsBalanceCapAndFullClaimRetry(t *testing.T) {
 	if err := r.login("friend-cap", host.Code, now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if r.credit("owner") != 400 {
+	if r.credit("owner") != pointsBalanceLimit-100 {
 		t.Fatal("capped invitation replayed")
 	}
 	wallet, err := r.wallet("owner", now)
-	if err != nil || wallet["points_balance_limit"] != 500 {
+	if err != nil || wallet["points_balance_limit"] != pointsBalanceLimit {
 		t.Fatal(wallet, err)
 	}
 }
@@ -488,10 +488,10 @@ func TestAdPointsDailyViewsAndCaps(t *testing.T) {
 	if n, err := r.claimAd("full", now); err != nil || n != 0 {
 		t.Fatalf("full wallet: %d %v", n, err)
 	}
-	if _, err := r.reserve("full", 20); err != nil {
+	if _, err := r.reserve("full", 10); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := r.claimAd("full", now); err != nil || n != 20 || r.credit("full") != pointsBalanceLimit {
+	if n, err := r.claimAd("full", now); err != nil || n != 10 || r.credit("full") != pointsBalanceLimit {
 		t.Fatalf("partial view: %d %v", n, err)
 	}
 	if wallet, err := r.wallet("full", now); err != nil || wallet["ad_views"] != 1 {

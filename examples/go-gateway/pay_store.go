@@ -151,7 +151,9 @@ type PayOrder struct {
 	// PaymentClosed records a platform-confirmed terminal unpaid order.
 	PaymentClosed bool
 	// Trial orders are free and never touch WeChat payment.
-	Trial                bool
+	Trial bool
+	// Output is the requested result format ("dual", "mono" or "both"); empty means dual.
+	Output               string
 	CreatedAt, LastQuery int64
 	// Delivery is "" while translating, "archived" once results are durable, "failed" when retries are exhausted.
 	Delivery           string

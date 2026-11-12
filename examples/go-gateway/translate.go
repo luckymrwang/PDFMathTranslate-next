@@ -141,6 +141,13 @@ func (s *Server) handleTranslateSubmit(w http.ResponseWriter, r *http.Request) {
 	if skip, ok := data["skip_image_translation"].(bool); ok {
 		forward["skip_image_translation"] = skip
 	}
+	requested, _ := data["output"].(string)
+	output, ok := parseOutput(requested)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid output mode")
+		return
+	}
+	outputParams(forward, output)
 	if pages, ok := data["pages"].(string); ok && pages != "" {
 		forward["pages"] = pages
 	}

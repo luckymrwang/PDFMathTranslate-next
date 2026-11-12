@@ -288,9 +288,16 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		UpgradeFrom string `json:"upgrade_from"`
 		// Ref is the invite code a new user arrived with; it only counts on their trial.
 		Ref string `json:"ref"`
+		// Output picks the result PDFs: "dual" (default), "mono" or "both".
+		Output string `json:"output"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil {
 		writeError(w, 400, "invalid settings")
+		return
+	}
+	output, ok := parseOutput(input.Output)
+	if !ok {
+		writeError(w, 400, "输出格式无效")
 		return
 	}
 	if input.Trial {
@@ -351,7 +358,7 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 	order := PayOrder{ID: id, OpenID: owner, Pages: file.Pages, Engine: input.Engine,
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 		Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
-		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit}
+		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, Output: output}
 	err = s.pay.store.addPurchase(&order, billed, func(o *PayOrder, remaining int) error { return s.pricePurchase(o, remaining, input.Platform, session) })
 	if err != nil {
 		writePurchaseError(w, err)

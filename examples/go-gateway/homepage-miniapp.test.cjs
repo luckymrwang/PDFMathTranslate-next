@@ -197,9 +197,17 @@ async function run() {
   const paid = created[created.length - 1].data
   assert.equal(paid.upgrade_from, 'trial-1')
   assert.equal(paid.engine, 'DeepSeek-V4.1-Flash')
+  assert.equal(paid.output, 'dual', 'Orders default to the dual PDF')
   const cancelledCreations = created.length
   await home.confirmTranslation()
   assert.equal(created.length, cancelledCreations + 1, 'Cancelled payment retries create a fresh order')
+  // Output format: remembered, carried by the job, unknown values fall back to dual.
+  home.selectOutput({ currentTarget: { dataset: { value: 'both' } } })
+  assert.equal(home.data.output, 'both')
+  assert.equal(home.makeJob().output, 'both')
+  assert.ok(Object.values(cache).includes('both'), 'Output choice is remembered')
+  home.selectOutput({ currentTarget: { dataset: { value: 'html' } } })
+  assert.equal(home.data.output, 'dual')
   // Fully covered by referral pages: no WeChat payment, straight to progress.
   freeOrders = true
   const before = navigated
