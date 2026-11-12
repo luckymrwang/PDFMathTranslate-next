@@ -1,12 +1,111 @@
 name: docker-publish
 
+# Builds every production image in CI; nothing is built or pushed from a dev
+# machine any more. Servers only `docker compose pull` (deploy/docker-deploy.sh).
+#
+#   luckymrwang/pdf2zh      translation API  (deploy/Dockerfile.api, CMD pdf2zh --api, :11008)
+#   luckymrwang/go-gateway  mini-program gateway (examples/go-gateway, :8080)
+#   luckymrwang/pdf2zh-web  all-in-one intranet image (lan-web/Dockerfile, layered on pdf2zh)
+#
+# The pdf2zh tag must stay the API image: deploy/docker-compose.yml runs it as
+# the `pdf2zh` service. It used to be built from the root Dockerfile (Gradio GUI,
+# :7860), which broke production the moment a server pulled it. Every image also
+# gets an immutable :<commit sha> tag so a bad :latest can be rolled back.
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+env:
+  API_IMAGE: luckymrwang/pdf2zh
+  GATEWAY_IMAGE: luckymrwang/go-gateway
+  WEB_IMAGE: luckymrwang/pdf2zh-web
+
 jobs:
-  build-and-push:
+  api:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Refresh babeldoc at most once a day (the Dockerfile's CACHEBUST layer).
+      - id: cachebust
+        run: echo "value=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Build API image for the smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.api
+          platforms: linux/amd64
+          build-args: CACHEBUST=${{ steps.cachebust.outputs.value }}
+          load: true
+          tags: pdf2zh-api:ci
+          cache-from: type=gha,scope=pdf2zh-api
+          cache-to: type=gha,mode=max,scope=pdf2zh-api
+      # Never publish an image that does not serve the API: start it the way
+      # compose does and require /health on :11008.
+      - name: Smoke test
+        run: |
+          docker run -d --name api -e PDF2ZH_API_HOST=127.0.0.1 -e PDF2ZH_API_PORT=11008 pdf2zh-api:ci
+          for i in $(seq 1 60); do
+            if docker exec api python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:11008/health',timeout=3)"; then
+              echo "API healthy after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          docker logs api | tail -50
+          echo "::error::the image does not serve the translation API on :11008"
+          exit 1
+      - name: Push API image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.api
+          platforms: linux/amd64
+          build-args: CACHEBUST=${{ steps.cachebust.outputs.value }}
+          push: true
+          tags: |
+            ${{ env.API_IMAGE }}:latest
+            ${{ env.API_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=pdf2zh-api
+
+  gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: examples/go-gateway/go.mod
+          cache-dependency-path: examples/go-gateway/go.sum
+      - name: Test gateway
+        working-directory: examples/go-gateway
+        run: go vet ./... && go test ./...
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: examples/go-gateway
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.GATEWAY_IMAGE }}:latest
+            ${{ env.GATEWAY_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=go-gateway
+          cache-to: type=gha,mode=max,scope=go-gateway
+
+  web:
+    needs: api
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -15,23 +114,16 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build and push pdf2zh
-        id: pdf2zh
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: luckymrwang/pdf2zh:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
       - name: Build and push pdf2zh-web
         uses: docker/build-push-action@v6
         with:
           context: .
           file: lan-web/Dockerfile
           platforms: linux/amd64
-          build-args: BASE_IMAGE=luckymrwang/pdf2zh@${{ steps.pdf2zh.outputs.digest }}
+          build-args: BASE_IMAGE=${{ env.API_IMAGE }}@${{ needs.api.outputs.digest }}
           push: true
-          tags: luckymrwang/pdf2zh-web:latest
+          tags: |
+            ${{ env.WEB_IMAGE }}:latest
+            ${{ env.WEB_IMAGE }}:${{ github.sha }}
           cache-from: type=gha,scope=pdf2zh-web
           cache-to: type=gha,mode=max,scope=pdf2zh-web

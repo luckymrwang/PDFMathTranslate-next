@@ -1,7 +1,8 @@
 # Docker Compose stack: Python translation API + Go gateway.
 # Run from this directory (deploy/):  docker compose up -d
 # Server deploy (pull + recreate):    deploy/docker-deploy.sh
-# Build & push images (dev machine):  deploy/docker-push.sh
+# Images are built and pushed by GitHub Actions (.github/workflows/docker-publish.yml)
+# on every push to main; the build: sections below are only for local experiments.
 #
 # Both containers use host networking: the gateway listens on host :8080
 # (the host reverse proxy terminates TLS in front of it, unchanged), and the
@@ -19,6 +20,9 @@ services:
       args:
         CACHEBUST: ${CACHEBUST:-1}
     image: luckymrwang/pdf2zh:latest
+    # Explicit so a wrong image (e.g. the root Dockerfile's Gradio GUI) can never
+    # start in place of the API.
+    command: ["pdf2zh", "--api"]
     restart: unless-stopped
     network_mode: host
     environment:

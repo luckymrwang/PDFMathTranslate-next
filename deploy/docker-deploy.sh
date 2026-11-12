@@ -1,7 +1,7 @@
 #!/bin/bash
 # Server deploy: guard against running translations -> git pull ->
 # docker compose pull -> docker compose up -d -> wait for health.
-# Images are built and pushed from the dev machine (deploy/docker-push.sh).
+# Images are built and pushed by GitHub Actions (docker-publish.yml); nothing is built here.
 # Replaces restart-all.sh for the compose stack (that script remains the
 # non-Docker fallback after `docker compose down`).
 # Usage: deploy/docker-deploy.sh [-f]
