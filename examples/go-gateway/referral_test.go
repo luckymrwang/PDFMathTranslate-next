@@ -228,7 +228,7 @@ func TestPointsLoginDailyCapAndChinaDay(t *testing.T) {
 	if n, err := s.pay.referrals.claim("host", now); n != 0 || err != nil {
 		t.Fatal(n, err)
 	}
-	if n, err := s.pay.referrals.claim("friend", now); n != 100 || err != nil {
+	if n, err := s.pay.referrals.claim("friend", now); n != dailyClaimReward || err != nil {
 		t.Fatal(n, err)
 	}
 	if n, err := s.pay.referrals.claim("friend", now); n != 0 || err != nil {
@@ -238,20 +238,20 @@ func TestPointsLoginDailyCapAndChinaDay(t *testing.T) {
 	if _, err := s.pay.referrals.reserve("host", 100); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := s.pay.referrals.claim("host", tomorrow); n != 100 || err != nil {
+	if n, err := s.pay.referrals.claim("host", tomorrow); n != dailyClaimReward || err != nil {
 		t.Fatal(n, err)
 	}
 	if err := s.pay.referrals.login("friend0", inviter.Code, tomorrow); err != nil {
 		t.Fatal(err)
 	}
-	if s.pay.referrals.credit("host") != 500 {
+	if s.pay.referrals.credit("host") != 400+dailyClaimReward {
 		t.Fatal("capped event replayed tomorrow")
 	}
 	if s.pay.referrals.credit("friend9") != 100 {
 		t.Fatal("host cap incorrectly capped friend")
 	}
 	wallet, err := s.pay.referrals.wallet("host", tomorrow)
-	if err != nil || wallet["daily_earned"] != 100 || wallet["daily_claimed"] != true {
+	if err != nil || wallet["daily_earned"] != dailyClaimReward || wallet["daily_claimed"] != true {
 		t.Fatal(wallet, err)
 	}
 }
@@ -454,6 +454,47 @@ func TestPointsBalanceCapAndFullClaimRetry(t *testing.T) {
 	}
 	wallet, err := r.wallet("owner", now)
 	if err != nil || wallet["points_balance_limit"] != 500 {
+		t.Fatal(wallet, err)
+	}
+}
+
+func TestAdPointsDailyViewsAndCaps(t *testing.T) {
+	s := testPayServer(t)
+	r := s.pay.referrals
+	now := time.Now()
+	if n, err := r.claim("viewer", now); err != nil || n != dailyClaimReward {
+		t.Fatalf("daily claim: %d %v", n, err)
+	}
+	for i := 0; i < adDailyLimit; i++ {
+		if n, err := r.claimAd("viewer", now); err != nil || n != adPointsReward {
+			t.Fatalf("ad view %d: %d %v", i, n, err)
+		}
+	}
+	if n, err := r.claimAd("viewer", now); err != nil || n != 0 {
+		t.Fatalf("view over daily limit: %d %v", n, err)
+	}
+	wallet, err := r.wallet("viewer", now)
+	if err != nil || wallet["ad_views"] != adDailyLimit || wallet["daily_earned"] != dailyClaimReward+adDailyLimit*adPointsReward || wallet["daily_claimed"] != true {
+		t.Fatal(wallet, err)
+	}
+	if n, err := r.claimAd("viewer", now.Add(24*time.Hour)); err != nil || n != adPointsReward {
+		t.Fatalf("next day view: %d %v", n, err)
+	}
+
+	// A full wallet neither pays nor uses up a view; a partial fill pays the remainder.
+	if err := r.restore("full", pointsBalanceLimit); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.claimAd("full", now); err != nil || n != 0 {
+		t.Fatalf("full wallet: %d %v", n, err)
+	}
+	if _, err := r.reserve("full", 20); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.claimAd("full", now); err != nil || n != 20 || r.credit("full") != pointsBalanceLimit {
+		t.Fatalf("partial view: %d %v", n, err)
+	}
+	if wallet, err := r.wallet("full", now); err != nil || wallet["ad_views"] != 1 {
 		t.Fatal(wallet, err)
 	}
 }

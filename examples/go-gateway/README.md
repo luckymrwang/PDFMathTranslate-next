@@ -192,12 +192,14 @@ wx.uploadFile({
 积分服务始终启用并使用 SQLite 持久化；现金支付由 `VIRTUALPAY_ENABLED` 单独控制。
 `POST /api/login` 接收 `code` 和可选的 `ref`，微信校验成功后的首次持久化登录绑定邀请。
 邀请双方各获最多 100 积分，每位用户独立受北京时间自然日 500 积分获取上限和 500 积分余额上限约束。
-手动 `POST /pay/points/claim` 每天领取一次最多 100 积分，和邀请奖励共享上限。超过余额上限的历史余额及订单退款保留，不再发放新奖励直至余额低于上限；余额已满时领取不会消耗当天的领取机会。
+手动 `POST /pay/points/claim` 每天领取一次最多 50 积分，和邀请奖励共享上限。超过余额上限的历史余额及订单退款保留，不再发放新奖励直至余额低于上限；余额已满时领取不会消耗当天的领取机会。
 封顶的邀请事件仍被记录，不会跨日补发。领取响应的 `awarded` 是实际发放数。
+`POST /pay/points/ad` 在用户看完激励视频后发放最多 50 积分，每人每天最多 3 次，和每日领取、邀请奖励共享上述两个上限；
+余额已满或当日已达上限时不发放，也不计入次数。微信激励视频没有服务端回调，接口只能靠每日次数防刷。响应字段同领取接口。
 
 `GET /pay/referral` 和 `GET /pay/config` 返回 `points_balance`、`points_balance_limit`、`daily_earned`、
 `daily_limit`、`daily_claimed`、`daily_reward`、`reward_points`、`points_per_page`、
-`engine_points_per_page`、`points_enabled`；前者另有 `code`/`invited`，后者的 `enabled` 只代表现金支付。
+`engine_points_per_page`、`points_enabled`、`ad_reward`、`ad_limit`、`ad_views`；前者另有 `code`/`invited`，后者的 `enabled` 只代表现金支付。
 这些路由及领取接口均需 Bearer 鉴权。
 
 仅 Bing 和 DeepSeek-V4.1-Flash 支持积分抵扣，均为 10 积分抵扣 1 整页；积分不足的剩余页按引擎原价

@@ -36,6 +36,9 @@ async function run() {
       if (name.endsWith('/api')) return api
       if (name.endsWith('/config')) return { demoMode: false }
       if (name.endsWith('/payment')) return payment
+      if (name.endsWith('/rewarded-ad')) return vm.runInNewContext(
+        fs.readFileSync(path.join(root, 'utils/rewarded-ad.js'), 'utf8') + ';module.exports',
+        { module: { exports: {} }, wx: sandbox.wx, console })
       if (name.endsWith('/order-status')) return vm.runInNewContext(
         fs.readFileSync(path.join(root, 'utils/order-status.js'), 'utf8') + ';module.exports',
         { module: { exports: {} }, require: n => n.endsWith('/payment') ? payment : { storageKey: k => 'dev:' + k }, wx: sandbox.wx })

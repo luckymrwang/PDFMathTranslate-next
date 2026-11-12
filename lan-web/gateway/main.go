@@ -92,6 +92,7 @@ func main() {
 	mux.Handle("/pay/query", srv.authRequired(http.HandlerFunc(srv.handlePayQuery)))
 	mux.Handle("/pay/referral", srv.authRequired(http.HandlerFunc(srv.handleReferral)))
 	mux.Handle("/pay/points/claim", srv.authRequired(http.HandlerFunc(srv.handlePointsClaim)))
+	mux.Handle("/pay/points/ad", srv.authRequired(http.HandlerFunc(srv.handlePointsAd)))
 	mux.HandleFunc("/pay/notify", srv.handlePayNotify)
 
 	httpServer := &http.Server{

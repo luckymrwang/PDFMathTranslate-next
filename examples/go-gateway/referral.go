@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -212,6 +213,15 @@ const dailyPointsLimit = 500
 const pointsBalanceLimit = 500
 const pointsReward = 100
 
+// dailyClaimReward is the free daily claim; invitations keep pointsReward.
+const dailyClaimReward = 50
+
+// Rewarded video ads add points on top of the daily claim and share its daily
+// and balance caps. WeChat offers no server-side proof that an ad was watched,
+// so the per-day count is the only limit a scripted client cannot bypass.
+const adPointsReward = 50
+const adDailyLimit = 3
+
 // enginePointsPerPage lists the engines whose pages points can redeem and the
 // points each page costs. Both redeem at the same 10 points per page; only pages
 // the points cannot cover are charged at the engine's cash price (DeepSeek 0.2 元/页).
@@ -241,13 +251,14 @@ func migratePoints(tx *databaseTx) error {
 }
 
 // Every earning event is recorded even if capped, so it cannot be replayed tomorrow.
-func earnPointsTx(tx *databaseTx, owner, event, day, kind string, claim bool) (int, error) {
+// Ad rewards that award nothing are not recorded, so a capped view is not counted.
+func earnPointsTx(tx *databaseTx, owner, event, day, kind string, amount int) (int, error) {
 	user, err := referralUserTx(tx, owner)
 	if err != nil {
 		return 0, err
 	}
-	// A full wallet does not consume the daily claim; invite events remain final.
-	if claim && user.Credit >= pointsBalanceLimit {
+	// A full wallet does not consume the daily claim or an ad view; invite events remain final.
+	if kind != "invite" && user.Credit >= pointsBalanceLimit {
 		return 0, nil
 	}
 	if _, err := tx.Exec("INSERT OR IGNORE INTO points_daily(openid,day) VALUES(?,?)", owner, day); err != nil {
@@ -257,7 +268,10 @@ func earnPointsTx(tx *databaseTx, owner, event, day, kind string, claim bool) (i
 	if err := tx.QueryRow("SELECT earned FROM points_daily WHERE openid=? AND day=?", owner, day).Scan(&earned); err != nil {
 		return 0, err
 	}
-	awarded := min(pointsReward, min(max(0, dailyPointsLimit-earned), max(0, pointsBalanceLimit-user.Credit)))
+	awarded := min(amount, min(max(0, dailyPointsLimit-earned), max(0, pointsBalanceLimit-user.Credit)))
+	if kind == "ad" && awarded == 0 {
+		return 0, nil
+	}
 	result, err := tx.Exec("INSERT OR IGNORE INTO points_ledger(event_key,openid,delta,day,kind) VALUES(?,?,?,?,?)", event, owner, awarded, day, kind)
 	if err != nil {
 		return 0, err
@@ -267,7 +281,7 @@ func earnPointsTx(tx *databaseTx, owner, event, day, kind string, claim bool) (i
 		return 0, err
 	}
 	claimed := 0
-	if claim {
+	if kind == "daily" {
 		claimed = 1
 	}
 	if _, err = tx.Exec("UPDATE points_daily SET earned=earned+?,claimed=max(claimed,?) WHERE openid=? AND day=?", awarded, claimed, owner, day); err != nil {
@@ -301,7 +315,7 @@ func (s *ReferralStore) login(owner, ref string, now time.Time) error {
 				return err
 			}
 			for _, who := range []string{owner, inviter} {
-				if _, err = earnPointsTx(tx, who, "invite:"+owner+":"+who, pointsDay(now), "invite", false); err != nil {
+				if _, err = earnPointsTx(tx, who, "invite:"+owner+":"+who, pointsDay(now), "invite", pointsReward); err != nil {
 					return err
 				}
 			}
@@ -319,7 +333,32 @@ func (s *ReferralStore) claim(owner string, now time.Time) (int, error) {
 	}
 	defer tx.Rollback()
 	day := pointsDay(now)
-	awarded, err := earnPointsTx(tx, owner, "daily:"+owner+":"+day, day, "daily", true)
+	awarded, err := earnPointsTx(tx, owner, "daily:"+owner+":"+day, day, "daily", dailyClaimReward)
+	if err != nil {
+		return 0, err
+	}
+	return awarded, tx.Commit()
+}
+func adViewsTx(tx *databaseTx, owner, day string) (int, error) {
+	var views int
+	err := tx.QueryRow("SELECT count(*) FROM points_ledger WHERE openid=? AND day=? AND kind='ad'", owner, day).Scan(&views)
+	return views, err
+}
+
+// claimAd awards one rewarded-video view. Concurrent claims for the same view
+// number collide on the ledger key, so at most adDailyLimit views pay per day.
+func (s *ReferralStore) claimAd(owner string, now time.Time) (int, error) {
+	tx, err := beginDatabaseTx(s.db)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	day := pointsDay(now)
+	views, err := adViewsTx(tx, owner, day)
+	if err != nil || views >= adDailyLimit {
+		return 0, err
+	}
+	awarded, err := earnPointsTx(tx, owner, "ad:"+owner+":"+day+":"+strconv.Itoa(views+1), day, "ad", adPointsReward)
 	if err != nil {
 		return 0, err
 	}
@@ -341,7 +380,11 @@ func (s *ReferralStore) wallet(owner string, now time.Time) (map[string]any, err
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	return map[string]any{"points_balance": balance, "points_balance_limit": pointsBalanceLimit, "daily_earned": earned, "daily_limit": dailyPointsLimit, "daily_claimed": claimed != 0, "daily_reward": pointsReward, "reward_points": pointsReward, "points_per_page": pointsPerPage, "engine_points_per_page": enginePointsPerPage, "points_enabled": true}, tx.Commit()
+	adViews, err := adViewsTx(tx, owner, pointsDay(now))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ad_reward": adPointsReward, "ad_limit": adDailyLimit, "ad_views": adViews, "points_balance": balance, "points_balance_limit": pointsBalanceLimit, "daily_earned": earned, "daily_limit": dailyPointsLimit, "daily_claimed": claimed != 0, "daily_reward": dailyClaimReward, "reward_points": pointsReward, "points_per_page": pointsPerPage, "engine_points_per_page": enginePointsPerPage, "points_enabled": true}, tx.Commit()
 }
 func (s *Server) handlePointsClaim(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -355,6 +398,30 @@ func (s *Server) handlePointsClaim(w http.ResponseWriter, r *http.Request) {
 	owner, _ := r.Context().Value(ctxKeyOpenID).(string)
 	now := time.Now()
 	awarded, err := s.pay.referrals.claim(owner, now)
+	if err != nil {
+		writeError(w, 500, "积分领取失败")
+		return
+	}
+	wallet, err := s.pay.referrals.wallet(owner, now)
+	if err != nil {
+		writeError(w, 500, "积分信息暂不可用")
+		return
+	}
+	wallet["awarded"] = awarded
+	writeJSON(w, 200, wallet)
+}
+func (s *Server) handlePointsAd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method not allowed")
+		return
+	}
+	if !s.ordersEnabled() {
+		writeError(w, 503, "积分暂未开放")
+		return
+	}
+	owner, _ := r.Context().Value(ctxKeyOpenID).(string)
+	now := time.Now()
+	awarded, err := s.pay.referrals.claimAd(owner, now)
 	if err != nil {
 		writeError(w, 500, "积分领取失败")
 		return
