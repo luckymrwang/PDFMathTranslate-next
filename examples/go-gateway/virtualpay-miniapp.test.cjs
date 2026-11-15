@@ -307,6 +307,15 @@ async function run() {
   await page.loadOrders()
   assert.equal(page.data.orders.length, 0, 'Payments the user cancelled are not listed as orders')
 
+  // Failed orders: points come back by themselves, scanned cash orders are finished by
+  // hand, and only the rest wait for a refund.
+  const { describeOrder } = require(path.join(root, 'utils/order-status.js'))
+  const failed = extra => describeOrder({ state: 'submitted', delivery: 'failed', total_fen: 0, ...extra }).label
+  assert.equal(failed({ points_spent: 70, scanned: true }), '翻译失败 · 积分已退回')
+  assert.equal(failed({ total_fen: 210, scanned: true }), '人工处理中')
+  assert.equal(failed({ total_fen: 210 }), '翻译失败 · 待退款')
+  assert.equal(failed({ trial: true }), '试译失败')
+
   console.log('PASS: payment proof, lifecycle, upload reuse, stable test amounts, prefetch, retry')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

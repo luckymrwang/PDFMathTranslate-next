@@ -288,3 +288,21 @@ func TestFirstScannedOrderGetsThreeFreePages(t *testing.T) {
 		t.Fatal("ineligible orders must not use up the offer")
 	}
 }
+
+func TestPointsOrderFailureTellsUserWhatHappened(t *testing.T) {
+	scan := PayOrder{Engine: "Bing", CreditPoints: 70, Scanned: true, Delivery: "failed"}
+	if got := paidFailureMessage(scan); got != msgScanPointsFailed {
+		t.Fatal("a scanned points order should say why and how to reorder:", got)
+	}
+	text := PayOrder{Engine: "Bing", CreditPoints: 70, Delivery: "failed"}
+	if got := paidFailureMessage(text); got != "翻译失败，本单积分已退回" {
+		t.Fatal(got)
+	}
+	cash := PayOrder{Engine: "Bing", Total: 70, Scanned: true, Delivery: "failed"}
+	if got := paidFailureMessage(cash); got != msgScanFailed {
+		t.Fatal("a scanned cash order is finished by hand:", got)
+	}
+	if !strings.Contains(scanReorderNote(scan), "GPT-5.6") || scanReorderNote(text) != "" {
+		t.Fatal("operator note should only suggest reordering scans")
+	}
+}

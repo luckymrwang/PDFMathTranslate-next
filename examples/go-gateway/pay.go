@@ -41,8 +41,8 @@ func orderView(order PayOrder) map[string]any {
 		"pages":          order.PageCount(),
 		"document_pages": order.DocumentPages, "trial_credit_pages": order.TrialCredit, "upgrade_from": order.UpgradeFrom,
 		"credit_pages": order.CreditPages, "points_covered_pages": order.CreditPages, "points_spent": order.CreditPoints,
-		"scan_free_pages": order.ScanFreePages,
-		"unit_price_fen":  order.UnitPrice, "total_fen": order.Total,
+		"scan_free_pages": order.ScanFreePages, "scanned": order.Scanned,
+		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial,
 		"output": outputOrDefault(order.Output)}
@@ -601,9 +601,12 @@ func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, e
 			return s.queueScanOrder(order)
 		}
 		if order.Scanned && order.Attempts == 0 {
+			next := "等它失败后我会再通知你，届时在 Mac 上执行 " + macCommand("adopt "+order.ID) + " 即可。"
+			if pointsOnly(order) {
+				next = "积分订单失败后会自动退回积分，并提示用户换 GPT 引擎重新下单，无需处理。"
+			}
 			s.notify("扫描件用 "+order.Engine+" 下单，自动翻译大概率失败（先不用处理）", orderSummary(order)+
-				"\n"+order.Engine+" 读不了图片里的文字；等它失败后我会再通知你，届时在 Mac 上执行 "+
-				macCommand("adopt "+order.ID)+" 即可。用户端已提示换 GPT 引擎。")
+				"\n"+order.Engine+" 读不了图片里的文字；"+next)
 		}
 		taskID, err := s.submitPaidOrder(ctx, order)
 		if errors.Is(err, errAlreadyTranslated) {

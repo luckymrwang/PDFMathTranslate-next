@@ -171,12 +171,14 @@ func (s *Server) nextPaidAttempt(id string) error {
 	}
 	if order, _ := s.pay.store.get(id); order.Delivery == "failed" {
 		log.Printf("paid translation failed after %d attempts; settlement recorded (order=%s)", maxPaidAttempts, id)
-		title := "付费订单翻译失败，需人工处理"
-		if order.Scanned {
+		title, next := "付费订单翻译失败，需人工处理", adoptHint(order)
+		switch {
+		case pointsOnly(order):
+			title, next = "积分订单翻译失败（无需处理）", "\n积分会自动退回，用户已被提示"+scanReorderNote(order)
+		case order.Scanned:
 			title = "扫描件翻译失败，请在 Mac 上立即处理"
 		}
-		s.notify(title, orderSummary(order)+
-			fmt.Sprintf("\n已自动重试 %d 次仍失败", maxPaidAttempts)+adoptHint(order))
+		s.notify(title, orderSummary(order)+fmt.Sprintf("\n已自动重试 %d 次仍失败", maxPaidAttempts)+next)
 		return errPaidFailed
 	}
 	return nil
@@ -196,8 +198,20 @@ func (s *Server) failPaidOrder(id, reason string) error {
 	}
 	log.Printf("paid translation cannot succeed (%s); settlement recorded (order=%s)", reason, id)
 	order, _ := s.pay.store.get(id)
-	s.notify("付费订单无法翻译", orderSummary(order)+"\n原因："+reason)
+	if pointsOnly(order) {
+		s.notify("积分订单无法翻译（无需处理）", orderSummary(order)+"\n原因："+reason+"\n积分会自动退回")
+	} else {
+		s.notify("付费订单无法翻译", orderSummary(order)+"\n原因："+reason)
+	}
 	return errPaidFailed
+}
+
+// scanReorderNote completes a points-order alert for a scan on a text-only engine.
+func scanReorderNote(order PayOrder) string {
+	if order.Scanned && !isScanEngine(order.Engine) {
+		return "换 GPT-5.6 / GPT-6 重新下单"
+	}
+	return ""
 }
 
 // adoptHint tells the operator exactly how to hand a failed scan to the Mac.
@@ -215,10 +229,21 @@ func macCommand(args string) string {
 	return "cd ~/Documents/www/python3/PDFMathTranslate-next/examples/mac-scan-worker && python3 scan_worker.py " + args
 }
 
+// pointsOnly orders are paid entirely with points; a failure gives the points back
+// automatically (settleReferrals), so nobody has to refund or rescue them.
+func pointsOnly(o PayOrder) bool { return !o.Trial && o.Total == 0 && o.CreditPoints > 0 }
+
+// msgScanPointsFailed tells a points order on a text-only engine how to get a result.
+const msgScanPointsFailed = "该文件是扫描件，翻译失败，本单积分已退回；请选择 GPT-5.6 或 GPT-6 重新下单"
+
 func paidFailureMessage(order PayOrder) string {
-	if order.Total == 0 && order.CreditPoints > 0 && order.CreditReturned {
+	// Points go back on the next reconciliation round (about a minute), so say so now.
+	if pointsOnly(order) {
 		if order.FailReason == alreadyTranslated {
 			return msgAlreadyTranslated + "；本单积分已退回"
+		}
+		if order.Scanned && !isScanEngine(order.Engine) {
+			return msgScanPointsFailed
 		}
 		return "翻译失败，本单积分已退回"
 	}
