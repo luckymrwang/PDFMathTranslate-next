@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +24,12 @@ type Server struct {
 	storage     *S3Client // nil when object storage is not configured
 	pay         *PayService
 	lanSettings *lanModelStore
+	// Scan worker state, mirrored from the production main.go; scan_worker.go
+	// compiles into the LAN binary too and needs these fields.
+	scanPoll, scanDue, scanAlert, scanOffline atomic.Int64
+	scanReason                                atomic.Value
+	scanSig                                   scanSignal
+	scanReminded                              sync.Map
 }
 
 func main() {

@@ -433,9 +433,9 @@ func (s *Server) scanResult(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	current, _ := s.pay.store.get(id)
 	if hold {
-		s.notify("大额扫描件质检未通过，已暂停交付", orderSummary(current)+"\n"+report+
-			"\n检查后在 Mac 上执行：\nscan_worker.py release "+id+"（直接交付）\n"+
-			"scan_worker.py release "+id+" --dual 修正后.pdf（换文件交付）")
+		s.notify("大额扫描件质检未通过，已暂停交付，等待你的复核", orderSummary(current)+"\n"+report+
+			"\n检查后在 Mac 终端执行（二选一）：\n"+macCommand("release "+id)+"  ← 直接交付\n"+
+			macCommand("release "+id+" --dual 修正后.pdf")+"  ← 换上修正后的文件再交付")
 		writeJSON(w, http.StatusOK, map[string]string{"delivery": "held"})
 		return
 	}
@@ -586,8 +586,8 @@ func (s *Server) scanFail(w http.ResponseWriter, r *http.Request, id string) {
 	} else if in.Pause {
 		s.notify("Mac 暂停处理扫描件", orderSummary(order)+"\n订单已退回队列（不计失败次数）\n原因："+in.Reason)
 	} else if failed {
-		s.notify("扫描件订单处理失败，需人工处理", orderSummary(order)+"\n原因："+in.Reason+
-			"\n处理后可在 Mac 上执行：scan_worker.py adopt "+id)
+		s.notify("扫描件订单处理失败，请在 Mac 上处理", orderSummary(order)+"\n原因："+in.Reason+
+			"\n👉 处理：在 Mac 终端执行 "+macCommand("adopt "+id))
 	} else {
 		s.notify("扫描件订单处理出错，已重新排队", orderSummary(order)+
 			fmt.Sprintf("\n第 %d 次尝试失败：%s", order.Attempts, in.Reason))
@@ -677,8 +677,8 @@ func (s *Server) reconcileScanQueue() {
 			if now.Unix()-since >= int64(scanHeldReminder.Seconds()) {
 				s.scanReminded.Store(o.ID, now.Unix())
 				hours := (now.Unix() - o.ScanHeldAt) / 3600
-				s.notify(fmt.Sprintf("提醒：扫描件订单已暂停交付 %d 小时，等待复核", hours),
-					orderSummary(o)+"\n放行：scan_worker.py release "+o.ID)
+				s.notify(fmt.Sprintf("提醒：扫描件订单已暂停交付 %d 小时，等待你的复核", hours),
+					orderSummary(o)+"\n放行（处理完这单就结束）：在 Mac 终端执行 "+macCommand("release "+o.ID))
 			}
 			continue
 		}
@@ -715,8 +715,9 @@ func (s *Server) reconcileScanQueue() {
 		}
 		fresh, _ := s.pay.store.get(o.ID)
 		if failed {
-			s.notify("扫描件订单多次处理中断，需人工处理", orderSummary(fresh)+
-				fmt.Sprintf("\n已中断 %d 次（Mac 关机或处理程序崩溃）", fresh.ScanTimeouts))
+			s.notify("扫描件订单多次处理中断，请在 Mac 上处理", orderSummary(fresh)+
+				fmt.Sprintf("\n已中断 %d 次（Mac 关机或处理程序崩溃）", fresh.ScanTimeouts)+
+				"\n👉 处理：在 Mac 终端执行 "+macCommand("adopt "+fresh.ID))
 		} else {
 			s.scanSig.wake()
 			log.Printf("scan lease expired, re-queued (order=%s, timeouts=%d)", o.ID, fresh.ScanTimeouts)

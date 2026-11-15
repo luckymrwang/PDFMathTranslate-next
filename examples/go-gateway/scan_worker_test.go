@@ -232,7 +232,7 @@ func TestScanWorkerFailureRetriesFailsAndCanBeAdopted(t *testing.T) {
 		t.Fatal("re-queued order not claimable", w.Code)
 	}
 	fail(false)
-	alerts.wait(t, "需人工处理")
+	alerts.wait(t, "请在 Mac 上处理")
 	failed, _ := s.pay.store.get(order.ID)
 	if failed.Delivery != "failed" || paidFailureMessage(failed) != msgScanFailed {
 		t.Fatal("final failure should ask for manual handling", failed.Delivery, paidFailureMessage(failed))
@@ -495,7 +495,7 @@ func TestLargeOrderHeldForReviewThenReleased(t *testing.T) {
 
 	s.pay.store.update(order.ID, func(c *PayOrder) error { c.ScanHeldAt = time.Now().Add(-7 * time.Hour).Unix(); return nil })
 	s.reconcileScanQueue()
-	alerts.wait(t, "等待复核")
+	alerts.wait(t, "等待你的复核")
 
 	upload, ct := pdfUpload(t, map[string]string{"dual": "%PDF-fixed"})
 	if w = workerCall(s, "POST", "/worker/scan/"+order.ID+"/release", upload, ct); w.Code != 200 {

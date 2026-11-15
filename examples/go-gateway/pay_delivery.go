@@ -32,12 +32,12 @@ var (
 // msgScanHint is shown when /v1/pdf/inspect flags an image-only scan. Such orders
 // are still accepted: GPT orders go to the Mac scan worker, other engines fail and
 // are finished manually by the operator.
-const msgScanHint = "检测到该 PDF 是扫描件（页面是图片，没有可提取的文字）。Bing、Google 和 DeepSeek 只能翻译文字，无法识别图片里的内容，用它们翻译扫描件达不到效果。\n建议：① 重新上传带文字的 PDF（非扫描版）；② 继续使用本文件并选择 GPT-5.6 或 GPT-6，它们会先识别图片中的文字再翻译，处理时间比普通文件长。"
+const msgScanHint = "检测到该 PDF 是扫描件（页面是图片）。标准翻译、 和 DeepSeek 只能翻译文字，无法识别图片里的内容。\n建议：① 请重新上传非扫描版的 PDF；② 继续使用本文件并选择支持扫描版的 GPT-5.6 或 GPT-6 模型。"
 
 // scanEngines read text from page images, so only they can translate scanned PDFs.
 var scanEngines = []string{"GPT-5.6", "GPT-6"}
 
-const msgScanFailed = "该文件是扫描件，系统自动翻译未完成，请联系客服人工处理"
+const msgScanFailed = "该文件是扫描件，系统需要先识别图片中的文字再翻译，处理时间稍长，完成后可直接在本页面查看并下载译文。"
 
 // addScanHint tells the client to suggest an OCR-capable engine; it never blocks the order.
 func addScanHint(out map[string]any, scanned bool) {
@@ -171,7 +171,11 @@ func (s *Server) nextPaidAttempt(id string) error {
 	}
 	if order, _ := s.pay.store.get(id); order.Delivery == "failed" {
 		log.Printf("paid translation failed after %d attempts; settlement recorded (order=%s)", maxPaidAttempts, id)
-		s.notify("付费订单翻译失败，需人工处理", orderSummary(order)+
+		title := "付费订单翻译失败，需人工处理"
+		if order.Scanned {
+			title = "扫描件翻译失败，请在 Mac 上立即处理"
+		}
+		s.notify(title, orderSummary(order)+
 			fmt.Sprintf("\n已自动重试 %d 次仍失败", maxPaidAttempts)+adoptHint(order))
 		return errPaidFailed
 	}
@@ -196,12 +200,19 @@ func (s *Server) failPaidOrder(id, reason string) error {
 	return errPaidFailed
 }
 
-// adoptHint suggests handing a failed scan to the Mac worker.
+// adoptHint tells the operator exactly how to hand a failed scan to the Mac.
 func adoptHint(order PayOrder) string {
 	if !order.Scanned {
 		return ""
 	}
-	return "\n扫描件可在 Mac 上执行：scan_worker.py adopt " + order.ID
+	return "\n👉 你需要做的事：在 Mac 终端执行下面这条命令，处理完会自动交付用户（用户已被告知转人工处理，不会来问客服退款）\n" +
+		macCommand("adopt " + order.ID)
+}
+
+// macCommand formats a scan_worker.py command for the operator's Mac, where
+// the repository lives at ~/Documents/www/python3/PDFMathTranslate-next.
+func macCommand(args string) string {
+	return "cd ~/Documents/www/python3/PDFMathTranslate-next/examples/mac-scan-worker && python3 scan_worker.py " + args
 }
 
 func paidFailureMessage(order PayOrder) string {

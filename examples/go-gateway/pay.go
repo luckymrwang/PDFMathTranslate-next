@@ -589,8 +589,9 @@ func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, e
 			return s.queueScanOrder(order)
 		}
 		if order.Scanned && order.Attempts == 0 {
-			s.notify("扫描件使用 "+order.Engine+" 下单，自动翻译大概率失败", orderSummary(order)+
-				"\n可在 Mac 上执行：scan_worker.py adopt "+order.ID)
+			s.notify("扫描件用 "+order.Engine+" 下单，自动翻译大概率失败（先不用处理）", orderSummary(order)+
+				"\n"+order.Engine+" 读不了图片里的文字；等它失败后我会再通知你，届时在 Mac 上执行 "+
+				macCommand("adopt "+order.ID)+" 即可。用户端已提示换 GPT 引擎。")
 		}
 		taskID, err := s.submitPaidOrder(ctx, order)
 		if errors.Is(err, errAlreadyTranslated) {
