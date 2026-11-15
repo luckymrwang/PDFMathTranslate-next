@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Operator alerts (scan worker progress, failed paid orders) go to one chat/push
@@ -61,7 +62,8 @@ func notifyRequest(ctx context.Context, target, title, body string) (*http.Reque
 	host := strings.ToLower(u.Hostname())
 	switch {
 	case host == "qyapi.weixin.qq.com", host == "oapi.dingtalk.com":
-		payload = map[string]any{"msgtype": "text", "text": map[string]string{"content": text}}
+		// WeCom rejects text over 2048 bytes outright; a cut message still arrives.
+		payload = map[string]any{"msgtype": "text", "text": map[string]string{"content": truncateUTF8(text, maxBotTextBytes)}}
 	case strings.HasSuffix(host, "feishu.cn"), strings.HasSuffix(host, "larksuite.com"):
 		payload = map[string]any{"msg_type": "text", "content": map[string]string{"text": text}}
 	case host == "api.day.app":
@@ -84,6 +86,21 @@ func notifyRequest(ctx context.Context, target, title, body string) (*http.Reque
 	return req, err
 }
 
+const maxBotTextBytes = 2000
+
+// truncateUTF8 cuts text to at most limit bytes without splitting a character.
+func truncateUTF8(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	const more = "\n…（内容过长，已截断）"
+	cut := limit - len(more)
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + more
+}
+
 // orderSummary describes an order for an operator alert.
 func orderSummary(o PayOrder) string {
 	lines := []string{
@@ -101,6 +118,9 @@ func orderSummary(o PayOrder) string {
 	}
 	if o.Scanned {
 		lines = append(lines, "类型：扫描件")
+	}
+	if o.ScanFreePages > 0 {
+		lines = append(lines, fmt.Sprintf("优惠：扫描件首单前 %d 页免费", o.ScanFreePages))
 	}
 	return strings.Join(lines, "\n")
 }

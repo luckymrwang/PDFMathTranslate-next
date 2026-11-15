@@ -205,8 +205,8 @@ func adoptHint(order PayOrder) string {
 	if !order.Scanned {
 		return ""
 	}
-	return "\n👉 你需要做的事：在 Mac 终端执行下面这条命令，处理完会自动交付用户（用户已被告知转人工处理，不会来问客服退款）\n" +
-		macCommand("adopt " + order.ID)
+	return "\n👉 你需要做的事：在 Mac 终端执行下面这条命令，处理完会自动交付用户（用户看到的是“处理时间稍长，完成后可直接下载”）\n" +
+		macCommand("adopt "+order.ID)
 }
 
 // macCommand formats a scan_worker.py command for the operator's Mac, where

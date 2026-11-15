@@ -249,6 +249,10 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 	})
 	out := map[string]any{"file_token": id, "page_count": result.Pages, "expires_at": expires.Unix()}
 	addScanHint(out, result.Scanned)
+	if result.Scanned {
+		// The client quotes it only for image-capable engines; the order re-checks it.
+		out["scan_free_pages"] = s.pay.store.scanFreeOffer(owner)
+	}
 	writeJSON(w, 200, out)
 }
 

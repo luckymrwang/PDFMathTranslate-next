@@ -157,6 +157,11 @@ type PayOrder struct {
 	// Scanned marks an image-only PDF. It is still sold; if automatic translation
 	// fails, an operator finishes it manually instead of refunding by default.
 	Scanned bool
+	// PaidAt is when the platform confirmed the cash payment (0 before it existed).
+	PaidAt int64
+	// ScanFreePages are pages of a scanned PDF left out of Quantity: a user's first
+	// paid scanned order on an image-capable engine gets its first pages free.
+	ScanFreePages int
 	// ScanWorker routes the order to the Mac scan worker instead of the Python API.
 	// ScanLease is when the worker's claim expires (0 while waiting); ScanStage and
 	// ScanProgress mirror the worker's progress for the client.
@@ -286,6 +291,11 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 	}
 	defer tx.Rollback()
 	candidate := *order
+	if free := s.scanFreeOfferLocked(candidate.OpenID); free > 0 && candidate.Scanned && !candidate.Trial &&
+		isScanEngine(candidate.Engine) && billed > free {
+		candidate.ScanFreePages = free
+		billed -= free
+	}
 	// Bing and DeepSeek pages can be redeemed with points (10 per page); the
 	// remaining pages are charged at the engine's cash price.
 	if per := enginePointsPerPage[candidate.Engine]; per > 0 {
@@ -319,6 +329,30 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 	*order = candidate
 	s.orders[order.ID] = candidate
 	return nil
+}
+
+// scanFreePages is how many leading pages a user's first scanned order gets free.
+const scanFreePages = 3
+
+// scanFreeOffer reports the free pages a user's next scanned order would get: 0 once
+// a discounted order has been paid. Unpaid, closed and refunded orders do not use it
+// up, so a cancelled payment can simply be retried.
+func (s *OrderStore) scanFreeOffer(openid string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scanFreeOfferLocked(openid)
+}
+
+func (s *OrderStore) scanFreeOfferLocked(openid string) int {
+	if openid == "" {
+		return 0
+	}
+	for _, o := range s.orders {
+		if o.OpenID == openid && o.ScanFreePages > 0 && (o.State == "paid" || o.State == "submitted") {
+			return 0
+		}
+	}
+	return scanFreePages
 }
 
 // creditReleased excludes local cancellation: those orders can still be paid late.

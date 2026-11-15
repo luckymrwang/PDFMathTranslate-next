@@ -41,7 +41,8 @@ func orderView(order PayOrder) map[string]any {
 		"pages":          order.PageCount(),
 		"document_pages": order.DocumentPages, "trial_credit_pages": order.TrialCredit, "upgrade_from": order.UpgradeFrom,
 		"credit_pages": order.CreditPages, "points_covered_pages": order.CreditPages, "points_spent": order.CreditPoints,
-		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
+		"scan_free_pages": order.ScanFreePages,
+		"unit_price_fen":  order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial,
 		"output": outputOrDefault(order.Output)}
@@ -452,7 +453,8 @@ func (s *Server) handlePayQuery(w http.ResponseWriter, r *http.Request) {
 // Grant only this PDF's translation entitlement. No coins, balance or client
 // success flag can grant it. Persist the platform ID before acknowledging.
 func (s *Server) grantOrder(id string, verified queriedOrder) error {
-	return s.pay.store.update(id, func(order *PayOrder) error {
+	paidNow := false
+	err := s.pay.store.update(id, func(order *PayOrder) error {
 		if verified.ID != order.ID || verified.EnvType != 1 {
 			return errors.New("platform order identity mismatch")
 		}
@@ -486,9 +488,19 @@ func (s *Server) grantOrder(id string, verified queriedOrder) error {
 		// A locally closed order the platform reports as paid was paid late; honour it.
 		if order.State == "pending" || order.State == "closed" {
 			order.State = "paid"
+			order.PaidAt = time.Now().Unix()
+			paidNow = true
 		}
 		return nil
 	})
+	if err == nil && paidNow {
+		// Both the payment callback and reconciliation land here; only the first
+		// transition to paid reports the sale.
+		if order, ok := s.pay.store.get(id); ok {
+			s.notify(fmt.Sprintf("新付费订单 ¥%.2f", float64(order.Total)/100), orderSummary(order)+"\n"+s.todaySales(time.Now()))
+		}
+	}
+	return err
 }
 
 // closePendingOrder closes an unpaid order after a user cancel or timeout.
@@ -680,6 +692,7 @@ func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, e
 
 func (s *Server) runPayReconciliation(ctx context.Context) {
 	round := 0
+	reportDay := initialReportDay(time.Now())
 	recoverOrders := func() {
 		queryWeChat := round%5 == 0
 		round++
@@ -743,6 +756,7 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 			}
 		}
 		s.reconcileScanQueue()
+		reportDay = s.maybeDailyReport(time.Now(), reportDay)
 	}
 	recoverOrders()
 	// Poll often enough to archive results well within the worker's task TTL.

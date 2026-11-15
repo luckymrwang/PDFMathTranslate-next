@@ -204,9 +204,10 @@ func TestPrepareFlagsScannedPDFWithoutBlocking(t *testing.T) {
 		Scanned     bool     `json:"scanned"`
 		Hint        string   `json:"scan_hint"`
 		Recommended []string `json:"recommended_engines"`
+		ScanFree    int      `json:"scan_free_pages"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &prepared)
-	if !prepared.Scanned || prepared.Hint != msgScanHint || prepared.Pages != 4 ||
+	if !prepared.Scanned || prepared.Hint != msgScanHint || prepared.Pages != 4 || prepared.ScanFree != scanFreePages ||
 		strings.Join(prepared.Recommended, ",") != "GPT-5.6,GPT-6" {
 		t.Fatal("missing scan hint", w.Body.String())
 	}
@@ -227,5 +228,63 @@ func TestPrepareFlagsScannedPDFWithoutBlocking(t *testing.T) {
 	failed.Delivery = "failed"
 	if got := paidFailureMessage(failed); got != msgScanFailed {
 		t.Fatal("scanned failure should ask for manual handling, not a refund:", got)
+	}
+}
+
+func TestFirstScannedOrderGetsThreeFreePages(t *testing.T) {
+	s := testPayServer(t)
+	store := s.pay.store
+	buy := func(owner, engine string, pages int, scanned bool) PayOrder {
+		t.Helper()
+		id, _ := newTradeNo()
+		order := PayOrder{ID: id, OpenID: owner, Pages: pages, Engine: engine, State: "pending",
+			Scanned: scanned, CreatedAt: time.Now().Unix()}
+		err := store.addPurchase(&order, pages, func(o *PayOrder, remaining int) error {
+			o.Quantity, o.Total = remaining, remaining*30
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return order
+	}
+	setState := func(id, state string) {
+		t.Helper()
+		if err := store.update(id, func(o *PayOrder) error { o.State = state; return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first := buy("owner", "GPT-5.6", 10, true)
+	if first.ScanFreePages != 3 || first.Quantity != 7 || first.Total != 210 {
+		t.Fatal("first scanned GPT order should bill 7 of 10 pages", first.ScanFreePages, first.Quantity, first.Total)
+	}
+	if retry := buy("owner", "GPT-6", 10, true); retry.ScanFreePages != 3 {
+		t.Fatal("an unpaid order must not use up the offer (cancelled payments are retried)")
+	}
+	setState(first.ID, "paid")
+	if store.scanFreeOffer("owner") != 0 {
+		t.Fatal("offer should be gone after a paid discounted order")
+	}
+	if again := buy("owner", "GPT-5.6", 10, true); again.ScanFreePages != 0 || again.Quantity != 10 {
+		t.Fatal("only the first paid scanned order is discounted", again.ScanFreePages)
+	}
+
+	refunded := buy("refunded", "GPT-5.6", 10, true)
+	setState(refunded.ID, "refunded")
+	if buy("refunded", "GPT-5.6", 10, true).ScanFreePages != 3 {
+		t.Fatal("a refunded order gives the offer back")
+	}
+	for name, order := range map[string]PayOrder{
+		"three pages or fewer": buy("small", "GPT-5.6", 3, true),
+		"text-only engine":     buy("bing", "Bing", 10, true),
+		"text PDF":             buy("text", "GPT-5.6", 10, false),
+	} {
+		if order.ScanFreePages != 0 || order.Quantity != order.Pages {
+			t.Fatal(name+" must not be discounted", order.ScanFreePages, order.Quantity)
+		}
+	}
+	if store.scanFreeOffer("small") != 3 || store.scanFreeOffer("") != 0 {
+		t.Fatal("ineligible orders must not use up the offer")
 	}
 }

@@ -201,6 +201,23 @@ async function run() {
   const cancelledCreations = created.length
   await home.confirmTranslation()
   assert.equal(created.length, cancelledCreations + 1, 'Cancelled payment retries create a fresh order')
+  // Scanned PDF: no modal; the payment sheet flags only engines that cannot read images.
+  home.setData({ scanEngines: ['GPT-5.6', 'GPT-6'] })
+  const scanNote = engine => { const v = home.scanValues(engine); return v.scanWarn + ':' + v.scanTarget }
+  assert.equal(scanNote('Bing'), 'true:GPT-5.6', 'Text-only engine is flagged')
+  assert.equal(scanNote('GPT-6'), 'false:', 'Image-capable engine is not flagged')
+  // First scanned order: GPT quotes leave the first 3 pages out once the gateway offers it.
+  home.setData({ scanFreeOffer: 0 })
+  const sevenPages = home.quoteValues(7, 'GPT-5.6').paymentTotal
+  home.setData({ scanFreeOffer: 3 })
+  const discounted = home.quoteValues(10, 'GPT-5.6')
+  assert.equal(discounted.scanFreePages, 3, 'GPT quote shows the free pages')
+  assert.equal(discounted.paymentTotal, sevenPages, '10 scanned pages cost the same as 7')
+  assert.equal(home.quoteValues(3, 'GPT-5.6').scanFreePages, 0, 'Three pages or fewer are not discounted')
+  assert.equal(home.quoteValues(10, 'Bing').scanFreePages, 0, 'Text-only engines are not discounted')
+  home.setData({ scanEngines: [], scanFreeOffer: 0 })
+  assert.equal(home.scanValues('Bing').scanWarn, false, 'Text PDFs show no scan note')
+  assert.equal(home.quoteValues(10, 'GPT-5.6').scanFreePages, 0, 'Text PDFs are not discounted')
   // Output format: remembered, carried by the job, unknown values fall back to dual.
   home.selectOutput({ currentTarget: { dataset: { value: 'both' } } })
   assert.equal(home.data.output, 'both')
