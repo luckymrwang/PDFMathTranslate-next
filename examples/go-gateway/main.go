@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +22,15 @@ type Server struct {
 	tasks    *taskRegistry
 	storage  *S3Client // nil when object storage is not configured
 	pay      *PayService
+	// scanPoll is the last time the Mac scan worker polled, scanDue when it promised to
+	// poll again; scanAlert throttles offline alerts. scanSig wakes long polls and
+	// scanReminded throttles reminders about orders held for review.
+	// scanOffline is when the worker was reported offline (0: not), scanReason why an
+	// alive worker cannot take orders ("" when it can).
+	scanPoll, scanDue, scanAlert, scanOffline atomic.Int64
+	scanReason                                atomic.Value
+	scanSig                                   scanSignal
+	scanReminded                              sync.Map
 }
 
 func main() {
@@ -89,6 +100,7 @@ func main() {
 	mux.Handle("/pay/points/claim", srv.authRequired(http.HandlerFunc(srv.handlePointsClaim)))
 	mux.Handle("/pay/points/ad", srv.authRequired(http.HandlerFunc(srv.handlePointsAd)))
 	mux.HandleFunc("/pay/notify", srv.handlePayNotify)
+	mux.HandleFunc("/worker/scan/", srv.handleScanWorker)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,

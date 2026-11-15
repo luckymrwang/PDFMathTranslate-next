@@ -284,7 +284,8 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 	raw, err := s.uploadFile(ctx, "/v1/pdf/inspect", stagedPath, header.Filename,
 		map[string]any{"lang_in": data.LangIn, "lang_out": data.LangOut, "translate_engine_settings": availableEngines()[data.Engine]}, "")
 	var inspected struct {
-		Pages int `json:"page_count"`
+		Pages   int  `json:"page_count"`
+		Scanned bool `json:"scanned"`
 	}
 	if err != nil || json.Unmarshal(raw, &inspected) != nil || inspected.Pages <= 0 || inspected.Pages > 1000 {
 		if errors.Is(err, errAlreadyTranslated) {
@@ -303,7 +304,7 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		Pages: inspected.Pages, Engine: data.Engine,
 		LangIn: data.LangIn, LangOut: data.LangOut, FilePath: stagedPath,
 		FileHash: hex.EncodeToString(hash.Sum(nil)), Name: filepath.Base(header.Filename),
-		State: "pending", CreatedAt: time.Now().Unix(), Attach: id, Output: output}
+		State: "pending", CreatedAt: time.Now().Unix(), Attach: id, Output: output, Scanned: inspected.Scanned}
 	if err := s.pay.store.addPurchase(&order, inspected.Pages, func(o *PayOrder, remaining int) error {
 		return s.pricePurchase(o, remaining, data.Platform, sessionKey)
 	}); err != nil {
@@ -311,11 +312,13 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved = true
-	if order.Total == 0 {
-		writeJSON(w, 200, map[string]any{"order": orderView(order)})
-		return
+	logScannedOrder(order)
+	out := map[string]any{"order": orderView(order)}
+	if order.Total != 0 {
+		out["payData"] = paymentData(order, s.pay.cfg.AppKey, sessionKey)
 	}
-	writeJSON(w, 200, map[string]any{"order": orderView(order), "payData": paymentData(order, s.pay.cfg.AppKey, sessionKey)})
+	addScanHint(out, order.Scanned)
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) handlePayOrders(w http.ResponseWriter, r *http.Request) {
@@ -582,6 +585,13 @@ func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, e
 			s.tasks.set(order.TaskID, order.OpenID)
 			return order.TaskID, nil
 		}
+		if routeToScanWorker(order) {
+			return s.queueScanOrder(order)
+		}
+		if order.Scanned && order.Attempts == 0 {
+			s.notify("扫描件使用 "+order.Engine+" 下单，自动翻译大概率失败", orderSummary(order)+
+				"\n可在 Mac 上执行：scan_worker.py adopt "+order.ID)
+		}
 		taskID, err := s.submitPaidOrder(ctx, order)
 		if errors.Is(err, errAlreadyTranslated) {
 			return "", s.failPaidOrder(order.ID, alreadyTranslated)
@@ -731,6 +741,7 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 				cancel()
 			}
 		}
+		s.reconcileScanQueue()
 	}
 	recoverOrders()
 	// Poll often enough to archive results well within the worker's task TTL.

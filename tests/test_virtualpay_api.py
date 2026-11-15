@@ -91,6 +91,36 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status_code, 422)
 
+    @staticmethod
+    def _scan_pdf(pages: int, ocr_text: str = "") -> bytes:
+        pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 80), False)
+        pixmap.clear_with(240)
+        image = pixmap.tobytes("png")
+        with pymupdf.open() as document:
+            for _ in range(pages):
+                page = document.new_page()
+                page.insert_image(page.rect, stream=image)
+                if ocr_text:
+                    page.insert_text((72, 100), ocr_text)
+            return document.tobytes()
+
+    async def test_image_only_scan_is_flagged_but_accepted(self):
+        result = await self.client.post(
+            "/v1/pdf/inspect",
+            files={"file": ("scan.pdf", self._scan_pdf(30), "application/pdf")},
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json(), {"page_count": 30, "scanned": True})
+
+    async def test_scan_with_text_layer_and_plain_pdf_are_not_flagged(self):
+        text = "This page already has a searchable OCR text layer."
+        for name, content in (("ocr.pdf", self._scan_pdf(5, text)), ("plain.pdf", self.pdf)):
+            result = await self.client.post(
+                "/v1/pdf/inspect", files={"file": (name, content, "application/pdf")}
+            )
+            self.assertEqual(result.status_code, 200, name)
+            self.assertFalse(result.json()["scanned"], name)
+
     async def test_quote_rejects_unavailable_engine(self):
         with patch("pdf2zh_next.translator.get_translator", side_effect=RuntimeError("private credential error")) as check:
             result = await self.client.post(

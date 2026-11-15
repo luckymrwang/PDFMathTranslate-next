@@ -153,7 +153,26 @@ type PayOrder struct {
 	// Trial orders are free and never touch WeChat payment.
 	Trial bool
 	// Output is the requested result format ("dual", "mono" or "both"); empty means dual.
-	Output               string
+	Output string
+	// Scanned marks an image-only PDF. It is still sold; if automatic translation
+	// fails, an operator finishes it manually instead of refunding by default.
+	Scanned bool
+	// ScanWorker routes the order to the Mac scan worker instead of the Python API.
+	// ScanLease is when the worker's claim expires (0 while waiting); ScanStage and
+	// ScanProgress mirror the worker's progress for the client.
+	ScanWorker   bool
+	ScanQueuedAt int64
+	ScanLease    int64
+	ScanStage    string
+	ScanProgress float64
+	// ScanHeld keeps a finished result undelivered for operator review (too many
+	// pages failed quality control); ScanReport is the worker's quality report.
+	ScanTimeouts int // leases that expired (worker died mid-order)
+	ScanHeld     bool
+	ScanHeldAt   int64
+	ScanReport   string
+	// DeliveredAt starts the result retention period (falls back to CreatedAt).
+	DeliveredAt          int64
 	CreatedAt, LastQuery int64
 	// Delivery is "" while translating, "archived" once results are durable, "failed" when retries are exhausted.
 	Delivery           string

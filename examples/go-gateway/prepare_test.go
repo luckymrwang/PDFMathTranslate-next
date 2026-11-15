@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -167,5 +168,64 @@ func TestPreparedFileOrderReuseAndOwnership(t *testing.T) {
 		if _, err := os.Stat(order.FilePath); err != nil {
 			t.Fatal("order file lost after expiry", err)
 		}
+	}
+}
+
+// An image-only scan is still accepted: the client only gets a hint steering the
+// user to OCR-capable engines, and the order remembers it for manual follow-up.
+func TestPrepareFlagsScannedPDFWithoutBlocking(t *testing.T) {
+	s := testPayServer(t)
+	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if r.URL.Path == "/v1/pdf/inspect" {
+			writeJSON(w, 200, map[string]any{"page_count": 4, "scanned": true})
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"ready": true})
+	}))
+	defer python.Close()
+	s.pdf2zh = NewPdf2zhClient(python.URL)
+	s.pay.sessions.set("token", "session")
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("file", "scan.pdf")
+	part.Write([]byte("%PDF-test"))
+	mw.Close()
+	r := ownRequest("POST", "/pay/prepare", "owner", &body)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	s.handlePreparePDF(w, r)
+	if w.Code != 200 {
+		t.Fatal("scanned PDF was blocked", w.Code, w.Body.String())
+	}
+	var prepared struct {
+		Token       string   `json:"file_token"`
+		Pages       int      `json:"page_count"`
+		Scanned     bool     `json:"scanned"`
+		Hint        string   `json:"scan_hint"`
+		Recommended []string `json:"recommended_engines"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &prepared)
+	if !prepared.Scanned || prepared.Hint != msgScanHint || prepared.Pages != 4 ||
+		strings.Join(prepared.Recommended, ",") != "GPT-5.6,GPT-6" {
+		t.Fatal("missing scan hint", w.Body.String())
+	}
+	payload, _ := json.Marshal(map[string]any{"file_token": prepared.Token,
+		"engine": "Bing", "lang_in": "en", "lang_out": "zh"})
+	req := ownRequest("POST", "/pay/order/prepared", "owner", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer token")
+	out := httptest.NewRecorder()
+	s.handlePreparedOrder(out, req)
+	if out.Code != 200 {
+		t.Fatal("scanned PDF order was refused", out.Code, out.Body.String())
+	}
+	orders := s.pay.store.all()
+	if len(orders) != 1 || !orders[0].Scanned {
+		t.Fatal("order did not keep the scan flag")
+	}
+	failed := orders[0]
+	failed.Delivery = "failed"
+	if got := paidFailureMessage(failed); got != msgScanFailed {
+		t.Fatal("scanned failure should ask for manual handling, not a refund:", got)
 	}
 }

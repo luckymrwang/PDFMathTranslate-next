@@ -386,6 +386,32 @@ _engine_checked_at: dict[str, float] = {}
 ALREADY_TRANSLATED = "already_translated"
 
 
+def _is_scanned_pdf(document: Any, sample_size: int = 20) -> bool:
+    """True when nearly every sampled page is a full-page image with (almost) no text.
+
+    Such image-only PDFs have no text layer, so BabelDOC aborts them with
+    "Scanned PDF detected"; a PDF with an OCR text layer has text and passes.
+    """
+    import pymupdf
+
+    pages = document.page_count
+    step = max(1, pages // sample_size)
+    sampled = list(range(0, pages, step))[:sample_size]
+    scanned = 0
+    for index in sampled:
+        page = document[index]
+        if len(page.get_text().strip()) >= 20:
+            continue
+        area = page.rect.width * page.rect.height
+        covered = 0.0
+        for info in page.get_image_info():
+            image = pymupdf.Rect(info["bbox"]) & page.rect
+            covered = max(covered, image.width * image.height)
+        if area > 0 and covered / area >= 0.6:
+            scanned += 1
+    return bool(sampled) and scanned / len(sampled) >= 0.8
+
+
 # Mirrors babeldoc.format.pdf.high_level.check_metadata, which refuses its own output.
 def _is_babeldoc_producer(metadata: dict[str, Any] | None) -> bool:
     producer = (metadata or {}).get("producer") or ""
@@ -440,7 +466,7 @@ async def check_engine(request: TranslateRequest) -> dict[str, bool]:
 
 
 @app.post("/v1/pdf/inspect")
-async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[str, int]:
+async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[str, Any]:
     """Server-side page count for pricing; never trust a client's quantity."""
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="only PDF files are supported")
@@ -463,11 +489,12 @@ async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[
                     pages = document.page_count
                     if not 1 <= pages <= 1000:
                         raise ValueError("PDF must contain 1 to 1000 pages")
-                    return pages, _is_babeldoc_producer(document.metadata)
+                    return (pages, _is_babeldoc_producer(document.metadata),
+                            _is_scanned_pdf(document))
             except Exception as error:
                 raise HTTPException(status_code=422, detail="cannot inspect PDF") from error
 
-        pages, already_translated = await asyncio.to_thread(count_pages)
+        pages, already_translated, scanned = await asyncio.to_thread(count_pages)
         if already_translated:
             raise HTTPException(status_code=422, detail=ALREADY_TRANSLATED)
         if data != "{}":
@@ -478,7 +505,9 @@ async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[
                 await _check_engine(request)
             except Exception as error:
                 raise HTTPException(status_code=503, detail="translation engine unavailable") from error
-        return {"page_count": pages}
+        # Scans are flagged, not refused: the order still goes through and is
+        # finished manually if the automatic translation cannot read it.
+        return {"page_count": pages, "scanned": scanned}
 
 
 @app.post("/v1/pdf/render")

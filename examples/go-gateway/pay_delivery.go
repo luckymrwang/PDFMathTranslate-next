@@ -29,6 +29,33 @@ var (
 	errAlreadyTranslated = errors.New("PDF is already a translation output")
 )
 
+// msgScanHint is shown when /v1/pdf/inspect flags an image-only scan. Such orders
+// are still accepted: GPT orders go to the Mac scan worker, other engines fail and
+// are finished manually by the operator.
+const msgScanHint = "检测到该 PDF 是扫描件（页面是图片，没有可提取的文字）。Bing、Google 和 DeepSeek 只能翻译文字，无法识别图片里的内容，用它们翻译扫描件达不到效果。\n建议：① 重新上传带文字的 PDF（非扫描版）；② 继续使用本文件并选择 GPT-5.6 或 GPT-6，它们会先识别图片中的文字再翻译，处理时间比普通文件长。"
+
+// scanEngines read text from page images, so only they can translate scanned PDFs.
+var scanEngines = []string{"GPT-5.6", "GPT-6"}
+
+const msgScanFailed = "该文件是扫描件，系统自动翻译未完成，请联系客服人工处理"
+
+// addScanHint tells the client to suggest an OCR-capable engine; it never blocks the order.
+func addScanHint(out map[string]any, scanned bool) {
+	out["scanned"] = scanned
+	if scanned {
+		out["scan_hint"] = msgScanHint
+		out["recommended_engines"] = scanEngines
+	}
+}
+
+// logScannedOrder leaves a trail for operators to find orders that may need manual work.
+func logScannedOrder(order PayOrder) {
+	if order.Scanned {
+		log.Printf("scanned PDF ordered (order=%s, engine=%s, pages=%d, scan_worker=%t)",
+			order.ID, order.Engine, order.PageCount(), routeToScanWorker(order))
+	}
+}
+
 // alreadyTranslated is the Python API's detail/error_type for BabelDOC output files.
 const alreadyTranslated = "already_translated"
 
@@ -88,6 +115,9 @@ func (s *Server) advancePaidOrder(ctx context.Context, id string, wait bool) err
 	if !ok || order.Delivery != "" || (order.State != "paid" && order.State != "submitted") {
 		return nil
 	}
+	if order.ScanWorker {
+		return nil // the Mac scan worker drives it; leases are checked in reconcileScanQueue
+	}
 	if order.TaskID == "" {
 		_, err := s.startPaidOrderLocked(ctx, id)
 		return err
@@ -141,6 +171,8 @@ func (s *Server) nextPaidAttempt(id string) error {
 	}
 	if order, _ := s.pay.store.get(id); order.Delivery == "failed" {
 		log.Printf("paid translation failed after %d attempts; settlement recorded (order=%s)", maxPaidAttempts, id)
+		s.notify("付费订单翻译失败，需人工处理", orderSummary(order)+
+			fmt.Sprintf("\n已自动重试 %d 次仍失败", maxPaidAttempts)+adoptHint(order))
 		return errPaidFailed
 	}
 	return nil
@@ -159,7 +191,17 @@ func (s *Server) failPaidOrder(id, reason string) error {
 		return err
 	}
 	log.Printf("paid translation cannot succeed (%s); settlement recorded (order=%s)", reason, id)
+	order, _ := s.pay.store.get(id)
+	s.notify("付费订单无法翻译", orderSummary(order)+"\n原因："+reason)
 	return errPaidFailed
+}
+
+// adoptHint suggests handing a failed scan to the Mac worker.
+func adoptHint(order PayOrder) string {
+	if !order.Scanned {
+		return ""
+	}
+	return "\n扫描件可在 Mac 上执行：scan_worker.py adopt " + order.ID
 }
 
 func paidFailureMessage(order PayOrder) string {
@@ -177,6 +219,9 @@ func paidFailureMessage(order PayOrder) string {
 	}
 	if order.FailReason == alreadyTranslated {
 		return msgAlreadyTranslated + "；本单请联系客服退款"
+	}
+	if order.Scanned || order.FailReason == scanFailReason {
+		return msgScanFailed
 	}
 	return "翻译多次失败，请联系客服处理退款"
 }
@@ -225,7 +270,7 @@ func (s *Server) expireOrder(ctx context.Context, id string) error {
 	}
 	defer unlock()
 	order, ok := s.pay.store.get(id)
-	if !ok || time.Since(time.Unix(order.CreatedAt, 0)) < resultRetention() {
+	if !ok || time.Since(time.Unix(max(order.CreatedAt, order.DeliveredAt), 0)) < resultRetention() {
 		return nil
 	}
 	finished := order.Delivery == "archived" || order.Delivery == "failed" ||
@@ -281,6 +326,7 @@ func (s *Server) archivePaidResult(ctx context.Context, order PayOrder) error {
 			return errors.New("order refunded")
 		}
 		current.MonoFile, current.DualFile, current.Delivery = mono, dual, "archived"
+		current.DeliveredAt = time.Now().Unix()
 		return nil
 	})
 	if err != nil {
@@ -385,6 +431,11 @@ func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order Pa
 		writeError(w, http.StatusGone, "译文已超过保留期，请重新下单")
 		return true
 	}
+	if order.ScanWorker && order.Delivery != "archived" && r.Method == http.MethodGet && sub != "" {
+		// Mac scan orders have no Python task to fall back to before delivery.
+		writeError(w, http.StatusConflict, "task not finished")
+		return true
+	}
 	switch {
 	case r.Method == http.MethodDelete && sub == "":
 		writeError(w, http.StatusConflict, "已支付的翻译任务不可取消")
@@ -456,6 +507,10 @@ func (s *Server) writePaidStatus(w http.ResponseWriter, r *http.Request, order P
 	case "failed":
 		writeJSON(w, http.StatusOK, map[string]any{"id": taskID, "state": "error", "progress": 0.0,
 			"error": paidFailureMessage(order)})
+		return
+	}
+	if order.ScanWorker {
+		s.writeScanStatus(w, order, taskID)
 		return
 	}
 	go func() {

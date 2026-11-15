@@ -22,6 +22,8 @@ type preparedPDF struct {
 	Owner, Path, Name, Hash string
 	Pages                   int
 	Expires                 time.Time
+	// Scanned marks an image-only PDF; it is ordered normally but may need manual work.
+	Scanned bool
 }
 
 type preparedFiles struct {
@@ -215,7 +217,8 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 	// No engine settings: inspecting a file only reads its page count.
 	raw, err := s.uploadFile(ctx, "/v1/pdf/inspect", staged.Name(), header.Filename, nil, "")
 	var result struct {
-		Pages int `json:"page_count"`
+		Pages   int  `json:"page_count"`
+		Scanned bool `json:"scanned"`
 	}
 	if err != nil || json.Unmarshal(raw, &result) != nil || result.Pages < 1 || result.Pages > 1000 {
 		log.Printf("prepare: page inspection failed (pages=%d): %v", result.Pages, err)
@@ -233,7 +236,7 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 	expires := time.Now().Add(30 * time.Minute)
 	s.prepared.Lock()
 	s.prepared.files[id] = preparedPDF{owner, staged.Name(), displayName,
-		hex.EncodeToString(hash.Sum(nil)), result.Pages, expires}
+		hex.EncodeToString(hash.Sum(nil)), result.Pages, expires, result.Scanned}
 	s.prepared.Unlock()
 	keep = true
 	time.AfterFunc(30*time.Minute, func() {
@@ -244,7 +247,9 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 			delete(s.prepared.files, id)
 		}
 	})
-	writeJSON(w, 200, map[string]any{"file_token": id, "page_count": result.Pages, "expires_at": expires.Unix()})
+	out := map[string]any{"file_token": id, "page_count": result.Pages, "expires_at": expires.Unix()}
+	addScanHint(out, result.Scanned)
+	writeJSON(w, 200, out)
 }
 
 // A distinct hard link lets each order retain its file after the preparation expires.
@@ -358,13 +363,14 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 	order := PayOrder{ID: id, OpenID: owner, Pages: file.Pages, Engine: input.Engine,
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 		Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
-		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, Output: output}
+		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, Output: output, Scanned: file.Scanned}
 	err = s.pay.store.addPurchase(&order, billed, func(o *PayOrder, remaining int) error { return s.pricePurchase(o, remaining, input.Platform, session) })
 	if err != nil {
 		writePurchaseError(w, err)
 		return
 	}
 	saved = true
+	logScannedOrder(order)
 	if order.Total == 0 {
 		writeJSON(w, 200, map[string]any{"order": orderView(order)})
 		return
