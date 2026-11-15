@@ -690,6 +690,20 @@ func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, e
 	return result.ID, nil
 }
 
+// latePaymentWindow bounds how long a closed order is still polled for a late payment.
+const latePaymentWindow = 7 * 24 * time.Hour
+
+// onceLogged keeps a retry that can never succeed (an order WeChat no longer knows)
+// from writing the same line every few minutes for weeks.
+var onceLogged sync.Map
+
+func logOnce(key, format string, args ...any) {
+	if _, seen := onceLogged.LoadOrStore(key, true); seen {
+		return
+	}
+	log.Printf(format, args...)
+}
+
 func (s *Server) runPayReconciliation(ctx context.Context) {
 	round := 0
 	reportDay := initialReportDay(time.Now())
@@ -714,10 +728,13 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 					unlock()
 				}
 			}
-			if queryWeChat && order.State == "closed" && !order.PaymentClosed && order.Total > 0 {
+			// A closed order is polled for a payment that landed late, but only for a
+			// while: WeChat drops old orders and then rejects every query for good.
+			if queryWeChat && order.State == "closed" && !order.PaymentClosed && order.Total > 0 &&
+				time.Since(time.Unix(order.CreatedAt, 0)) < latePaymentWindow {
 				checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				if err := s.reconcileOrder(checkCtx, order.ID); err != nil {
-					log.Printf("closed order reconcile failed (order=%s): %v", order.ID, err)
+					logOnce("closed:"+order.ID, "closed order reconcile failed (order=%s): %v", order.ID, err)
 				}
 				cancel()
 				order, _ = s.pay.store.get(order.ID)

@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -140,5 +145,47 @@ func TestBotTextIsCutWithoutBreakingCharacters(t *testing.T) {
 	}
 	if truncateUTF8("短消息", maxBotTextBytes) != "短消息" {
 		t.Fatal("short text changed")
+	}
+}
+
+func TestClosedOrdersStopBeingPolledWeChat(t *testing.T) {
+	s := testPayServer(t)
+	var queries atomic.Int32
+	wx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if r.URL.Path == "/xpay/query_order" {
+			queries.Add(1)
+			writeJSON(w, 200, map[string]any{"errcode": 268490002, "errmsg": "order not exist"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"access_token": "t", "expires_in": 7200})
+	}))
+	defer wx.Close()
+	s.pay.client = &XPayClient{AppID: defaultAppID, AppSecret: "secret", AppKey: "app-key", BaseURL: wx.URL, HTTP: wx.Client()}
+
+	yesterday, longAgo := time.Now().Add(-24*time.Hour).Unix(), time.Now().Add(-30*24*time.Hour).Unix()
+	for _, o := range []PayOrder{
+		{ID: "Tfresh", OpenID: "owner", Engine: "GPT-5.6", Total: 300, State: "closed", CreatedAt: yesterday},
+		{ID: "Told", OpenID: "owner", Engine: "GPT-5.6", Total: 300, State: "closed", CreatedAt: longAgo},
+	} {
+		if err := s.pay.store.add(o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.runPayReconciliation(ctx)
+	deadline := time.Now().Add(3 * time.Second)
+	for queries.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if queries.Load() == 0 {
+		t.Fatal("a recent closed order must still be polled for a late payment")
+	}
+	if _, polled := onceLogged.Load("closed:Told"); polled {
+		t.Fatal("an order past the late payment window must not be polled")
+	}
+	if _, polled := onceLogged.Load("closed:Tfresh"); !polled {
+		t.Fatal("the recent closed order should have been polled (and its failure logged once)")
 	}
 }
