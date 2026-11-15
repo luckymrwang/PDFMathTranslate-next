@@ -32,7 +32,7 @@ var (
 // msgScanHint is shown when /v1/pdf/inspect flags an image-only scan. Such orders
 // are still accepted: GPT orders go to the Mac scan worker, other engines fail and
 // are finished manually by the operator.
-const msgScanHint = "检测到该 PDF 是扫描件（页面是图片）。标准翻译、 和 DeepSeek 只能翻译文字，无法识别图片里的内容。\n建议：① 请重新上传非扫描版的 PDF；② 继续使用本文件并选择支持扫描版的 GPT-5.6 或 GPT-6 模型。"
+const msgScanHint = "检测到该 PDF 是扫描件（页面是图片）。标准翻译和 DeepSeek 只能翻译文字，无法识别图片里的内容。\n建议：① 请重新上传非扫描版的 PDF；② 继续使用本文件并选择支持扫描版的 GPT-5.6 或 GPT-6 模型。"
 
 // scanEngines read text from page images, so only they can translate scanned PDFs.
 var scanEngines = []string{"GPT-5.6", "GPT-6"}
