@@ -7,6 +7,7 @@ const root = process.argv[2]
 assert.ok(root)
 async function run() {
   let page, created = [], navigated = 0, relaunched = 0
+  let modals = [], modalAnswer = true
   const app = { globalData: {} }, cache = {}
   const realPayment = require(path.join(root, 'utils/payment.js'))
   const payment = { ...realPayment, isIOS: () => false, assertPaymentSupported() {},
@@ -49,6 +50,7 @@ async function run() {
     wx: {
       getStorageSync: k => cache[k], setStorageSync: (k, v) => { cache[k] = v },
       navigateTo: () => navigated++, showToast() {}, reLaunch: () => relaunched++,
+      showModal: options => { modals.push(options); if (options.success) options.success({ confirm: modalAnswer, cancel: !modalAnswer }) },
     }, console, setTimeout,
   }
   const load = file => {
@@ -206,6 +208,19 @@ async function run() {
   const scanNote = engine => { const v = home.scanValues(engine); return v.scanWarn + ':' + v.scanTarget }
   assert.equal(scanNote('Bing'), 'true:GPT-5.6', 'Text-only engine is flagged')
   assert.equal(scanNote('GPT-6'), 'false:', 'Image-capable engine is not flagged')
+  // Paying for a scan with a text-only engine asks first and can switch the engine.
+  home.setData({ engines: ['Bing', 'GPT-5.6', 'GPT-6'], engine: 'Bing',
+    scanWarn: true, scanTarget: 'GPT-5.6', scanNames: 'GPT-5.6 或 GPT-6' })
+  modalAnswer = true
+  assert.equal(await home.scanReadyToPay(), false, 'Choosing the scan engine stops this payment')
+  assert.equal(home.data.engine, 'GPT-5.6', 'and selects it')
+  assert.equal(modals.length, 1)
+  assert.match(modals[0].content, /GPT-5\.6/)
+  home.setData({ engine: 'Bing', scanWarn: true, scanTarget: 'GPT-5.6', scanNames: 'GPT-5.6 或 GPT-6' })
+  modalAnswer = false
+  assert.equal(await home.scanReadyToPay(), true, 'The user may still pay with a text-only engine')
+  assert.equal(await home.scanReadyToPay(), true, 'and is asked only once for that engine')
+  assert.equal(modals.length, 2)
   // First scanned order: GPT quotes leave the first 3 pages out once the gateway offers it.
   home.setData({ scanFreeOffer: 0 })
   const sevenPages = home.quoteValues(7, 'GPT-5.6').paymentTotal
