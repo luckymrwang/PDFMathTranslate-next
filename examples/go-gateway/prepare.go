@@ -250,8 +250,10 @@ func (s *Server) handlePreparePDF(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"file_token": id, "page_count": result.Pages, "expires_at": expires.Unix()}
 	addScanHint(out, result.Scanned)
 	if result.Scanned {
-		// The client quotes it only for image-capable engines; the order re-checks it.
-		out["scan_free_pages"] = s.pay.store.scanFreeOffer(owner)
+		// The client sizes the discount for the engine it is quoting; the order
+		// recomputes it server-side, so a client cannot grant itself a bigger one.
+		out["scan_discount_percent"] = scanDiscountPercent
+		out["scan_discount_cap_fen"] = scanDiscountCapFen
 	}
 	writeJSON(w, 200, out)
 }
@@ -368,7 +370,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 		Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
 		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, Output: output, Scanned: file.Scanned}
-	err = s.pay.store.addPurchase(&order, billed, func(o *PayOrder, remaining int) error { return s.pricePurchase(o, remaining, input.Platform, session) })
+	free := s.scanDiscountFor(order.Engine, billed, order.Scanned)
+	err = s.pay.store.addPurchase(&order, billed, free, func(o *PayOrder, remaining int) error { return s.pricePurchase(o, remaining, input.Platform, session) })
 	if err != nil {
 		writePurchaseError(w, err)
 		return

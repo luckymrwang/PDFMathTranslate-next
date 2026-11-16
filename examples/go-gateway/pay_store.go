@@ -272,7 +272,7 @@ func (s *OrderStore) add(order PayOrder) error {
 }
 
 // addPurchase reserves referral pages and inserts the priced order atomically.
-func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrder, int) error) error {
+func (s *OrderStore) addPurchase(order *PayOrder, billed, free int, price func(*PayOrder, int) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.orders[order.ID]; exists {
@@ -291,8 +291,9 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 	}
 	defer tx.Rollback()
 	candidate := *order
-	if free := s.scanFreeOfferLocked(candidate.OpenID); free > 0 && candidate.Scanned && !candidate.Trial &&
-		isScanEngine(candidate.Engine) && billed > free {
+	// The scan discount is expressed in whole pages because WeChat charges a
+	// registered price per page; the caller sizes it for this document.
+	if free > 0 && candidate.Scanned && !candidate.Trial && billed > free {
 		candidate.ScanFreePages = free
 		billed -= free
 	}
@@ -331,28 +332,30 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed int, price func(*PayOrd
 	return nil
 }
 
-// scanFreePages is how many leading pages a user's first scanned order gets free.
-const scanFreePages = 3
+// Every scanned order is discounted: scanDiscountPercent off, at most
+// scanDiscountCapFen. WeChat bills a registered price per page, so the discount is
+// taken as whole pages; ceil() means the real saving is the stated one or better.
+const (
+	scanDiscountPercent = 20
+	scanDiscountCapFen  = 2000
+)
 
-// scanFreeOffer reports the free pages a user's next scanned order would get: 0 once
-// a discounted order has been paid. Unpaid, closed and refunded orders do not use it
-// up, so a cancelled payment can simply be retried.
-func (s *OrderStore) scanFreeOffer(openid string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.scanFreeOfferLocked(openid)
-}
-
-func (s *OrderStore) scanFreeOfferLocked(openid string) int {
-	if openid == "" {
+// scanDiscountPages is how many pages of a bill are left out for the scan discount.
+// unitFen is the engine's per-page price; at least one page is always paid for.
+func scanDiscountPages(pages, unitFen int) int {
+	if pages <= 1 {
 		return 0
 	}
-	for _, o := range s.orders {
-		if o.OpenID == openid && o.ScanFreePages > 0 && (o.State == "paid" || o.State == "submitted") {
-			return 0
+	free := (pages*scanDiscountPercent + 99) / 100
+	if unitFen > 0 {
+		if capped := scanDiscountCapFen / unitFen; free > capped {
+			free = capped
 		}
 	}
-	return scanFreePages
+	if free > pages-1 {
+		free = pages - 1
+	}
+	return free
 }
 
 // creditReleased excludes local cancellation: those orders can still be paid late.

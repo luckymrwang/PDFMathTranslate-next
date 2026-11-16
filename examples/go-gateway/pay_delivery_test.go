@@ -266,7 +266,7 @@ func TestFailedPointsUpgradeReplacementCanUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	replacement := PayOrder{ID: "replacement", OpenID: "owner", State: "pending", Engine: "Bing", UpgradeFrom: "historical", TrialCredit: 3}
-	if err := s.pay.store.addPurchase(&replacement, 2, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "", "") }); err != nil {
+	if err := s.pay.store.addPurchase(&replacement, 2, 0, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "", "") }); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.pay.store.update(replacement.ID, func(o *PayOrder) error { o.State = "submitted"; o.TaskID = "replacement-task"; return nil }); err != nil {

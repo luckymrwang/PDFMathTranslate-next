@@ -134,14 +134,14 @@ func TestSQLitePurchaseRollbackAndConcurrentReservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	order := PayOrder{ID: "failed", OpenID: "owner", Engine: "Bing"}
-	if err := s.pay.store.addPurchase(&order, 3, price); err == nil {
+	if err := s.pay.store.addPurchase(&order, 3, 0, price); err == nil {
 		t.Fatal("accepted failed insert")
 	}
 	if s.pay.referrals.credit("owner") != 50 || len(s.pay.store.all()) != 0 || order.CreditPages != 0 {
 		t.Fatal("debit survived failure")
 	}
 	s.pay.store.db.Exec("DROP TRIGGER fail_insert")
-	if err := s.pay.store.addPurchase(&order, 3, func(*PayOrder, int) error { return errors.New("price failed") }); err == nil || s.pay.referrals.credit("owner") != 50 {
+	if err := s.pay.store.addPurchase(&order, 3, 0, func(*PayOrder, int) error { return errors.New("price failed") }); err == nil || s.pay.referrals.credit("owner") != 50 {
 		t.Fatal("price failure not rolled back")
 	}
 	var wg sync.WaitGroup
@@ -150,7 +150,7 @@ func TestSQLitePurchaseRollbackAndConcurrentReservations(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			o := PayOrder{ID: fmt.Sprint(i), OpenID: "owner", Engine: "Bing"}
-			if err := s.pay.store.addPurchase(&o, 3, price); err != nil {
+			if err := s.pay.store.addPurchase(&o, 3, 0, price); err != nil {
 				t.Error(err)
 			}
 		}(i)
@@ -178,7 +178,7 @@ func TestSQLiteCommitFailureLeavesOrderAndBalanceUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	order := PayOrder{ID: "commit-failed", OpenID: "owner", Engine: "Bing"}
-	err = s.pay.store.addPurchase(&order, 3, func(o *PayOrder, n int) error { o.Total = n * 10; return nil })
+	err = s.pay.store.addPurchase(&order, 3, 0, func(o *PayOrder, n int) error { o.Total = n * 10; return nil })
 	if err == nil {
 		t.Fatal("commit unexpectedly succeeded")
 	}

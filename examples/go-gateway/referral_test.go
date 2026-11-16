@@ -302,7 +302,7 @@ func TestPointsWholePagesAndFailureReturn(t *testing.T) {
 				t.Fatal(err)
 			}
 			o := PayOrder{ID: "points", OpenID: "owner", Engine: c.engine, Pages: 2}
-			err := s.pay.store.addPurchase(&o, 2, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "ios", "") })
+			err := s.pay.store.addPurchase(&o, 2, 0, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "ios", "") })
 			per := enginePointsPerPage[c.engine]
 			if per == 0 {
 				if !errors.Is(err, errCashDisabled) || s.pay.referrals.credit("owner") != c.balance {
@@ -339,7 +339,7 @@ func TestPointsWholePagesAndFailureReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	o := PayOrder{ID: "partial", OpenID: "owner", Engine: "DeepSeek-V4.1-Flash", Pages: 2}
-	if err := s.pay.store.addPurchase(&o, 2, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "ios", "") }); !errors.Is(err, errCashDisabled) ||
+	if err := s.pay.store.addPurchase(&o, 2, 0, func(o *PayOrder, n int) error { return s.pricePurchase(o, n, "ios", "") }); !errors.Is(err, errCashDisabled) ||
 		o.CreditPoints != 0 || s.pay.referrals.credit("owner") != 9 {
 		t.Fatal(o, err)
 	}

@@ -306,7 +306,8 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		LangIn: data.LangIn, LangOut: data.LangOut, FilePath: stagedPath,
 		FileHash: hex.EncodeToString(hash.Sum(nil)), Name: filepath.Base(header.Filename),
 		State: "pending", CreatedAt: time.Now().Unix(), Attach: id, Output: output, Scanned: inspected.Scanned}
-	if err := s.pay.store.addPurchase(&order, inspected.Pages, func(o *PayOrder, remaining int) error {
+	free := s.scanDiscountFor(order.Engine, inspected.Pages, order.Scanned)
+	if err := s.pay.store.addPurchase(&order, inspected.Pages, free, func(o *PayOrder, remaining int) error {
 		return s.pricePurchase(o, remaining, data.Platform, sessionKey)
 	}); err != nil {
 		writePurchaseError(w, err)
@@ -807,6 +808,16 @@ func (s *Server) resumePaid(id string) {
 
 var errCashDisabled = errors.New("付费翻译暂未开放，积分不足以抵扣全文")
 var errPaymentSession = errors.New("请重新登录后支付")
+
+// scanDiscountFor sizes a scanned order's discount at the engine's per-page price.
+// A text PDF gets nothing; the client's preview uses the same rule.
+func (s *Server) scanDiscountFor(engine string, pages int, scanned bool) int {
+	if !scanned {
+		return 0
+	}
+	_, unit := s.pay.cfg.productFor(engine)
+	return scanDiscountPages(pages, unit)
+}
 
 func (s *Server) pricePurchase(o *PayOrder, remaining int, platform, session string) error {
 	if remaining == 0 {

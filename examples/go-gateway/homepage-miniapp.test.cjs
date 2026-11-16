@@ -7,7 +7,6 @@ const root = process.argv[2]
 assert.ok(root)
 async function run() {
   let page, created = [], navigated = 0, relaunched = 0
-  let modals = [], modalAnswer = true
   const app = { globalData: {} }, cache = {}
   const realPayment = require(path.join(root, 'utils/payment.js'))
   const payment = { ...realPayment, isIOS: () => false, assertPaymentSupported() {},
@@ -50,7 +49,6 @@ async function run() {
     wx: {
       getStorageSync: k => cache[k], setStorageSync: (k, v) => { cache[k] = v },
       navigateTo: () => navigated++, showToast() {}, reLaunch: () => relaunched++,
-      showModal: options => { modals.push(options); if (options.success) options.success({ confirm: modalAnswer, cancel: !modalAnswer }) },
     }, console, setTimeout,
   }
   const load = file => {
@@ -211,20 +209,7 @@ async function run() {
   // Paying for a scan with a text-only engine asks first and can switch the engine.
   home.setData({ engines: ['Bing', 'GPT-5.6', 'GPT-6'], engine: 'Bing',
     scanWarn: true, scanTarget: 'GPT-5.6', scanNames: 'GPT-5.6 或 GPT-6' })
-  modalAnswer = true
-  assert.equal(await home.scanReadyToPay(), false, 'Choosing the scan engine stops this payment')
-  assert.equal(home.data.engine, 'GPT-5.6', 'and selects it')
-  assert.equal(modals.length, 1)
-  assert.match(modals[0].content, /GPT-5\.6/)
-  home.setData({ engine: 'Bing', scanWarn: true, scanTarget: 'GPT-5.6', scanNames: 'GPT-5.6 或 GPT-6' })
-  modalAnswer = false
-  assert.equal(await home.scanReadyToPay(), true, 'The user may still pay with a text-only engine')
-  assert.equal(await home.scanReadyToPay(), true, 'and is asked only once for that engine')
-  assert.equal(modals.length, 2)
-  // Paying for a scan with a text-only engine asks first and can switch the engine.
-  home.setData({ engines: ['Bing', 'GPT-5.6', 'GPT-6'], engine: 'Bing', paymentTotal: '0.00',
-    scanWarn: true, scanTarget: 'GPT-5.6', scanNames: 'GPT-5.6 或 GPT-6',
-    upgradeOptions: [{ engine: 'GPT-5.6', scanOk: true }] })
+  home.setData({ upgradeOptions: [{ engine: 'GPT-5.6', scanOk: true }], paymentTotal: '0.00' })
   let ready = home.scanReadyToPay()
   assert.equal(home.data.scanDialog, true, 'A scan on a text-only engine opens the check')
   assert.match(home.data.scanOutcome, /积分自动退回/)
@@ -240,16 +225,19 @@ async function run() {
   home.scanDialogContinue()
   assert.equal(await ready, true, 'The user may still pay with a text-only engine')
   assert.equal(await home.scanReadyToPay(), true, 'and is asked only once for that engine')
-  // First scanned order: GPT quotes leave the first 3 pages out once the gateway offers it.
-  home.setData({ scanFreeOffer: 0 })
-  const sevenPages = home.quoteValues(7, 'GPT-5.6').paymentTotal
-  home.setData({ scanFreeOffer: 3 })
+  // Scan discount: every scanned order leaves 8折 worth of whole pages off the bill.
+  home.setData({ scanDiscountPercent: 0, scanDiscountCapFen: 0 })
+  const fullScan = home.quoteValues(10, 'GPT-5.6').paymentTotal
+  home.setData({ scanDiscountPercent: 20, scanDiscountCapFen: 2000 })
   const discounted = home.quoteValues(10, 'GPT-5.6')
-  assert.equal(discounted.scanFreePages, 3, 'GPT quote shows the free pages')
-  assert.equal(discounted.paymentTotal, sevenPages, '10 scanned pages cost the same as 7')
-  assert.equal(home.quoteValues(3, 'GPT-5.6').scanFreePages, 0, 'Three pages or fewer are not discounted')
-  assert.equal(home.quoteValues(10, 'Bing').scanFreePages, 0, 'Text-only engines are not discounted')
-  home.setData({ scanEngines: [], scanFreeOffer: 0 })
+  assert.equal(discounted.scanFreePages, 2, '20% of 10 pages')
+  assert.equal(discounted.scanDiscountLabel, '8 折')
+  assert.equal(discounted.scanFreeAmount, '0.60', '2 pages at 0.30')
+  assert.equal(Number(discounted.paymentTotal), Number(fullScan) - 0.6, 'the quote drops by the discount')
+  assert.equal(home.quoteValues(10, 'GPT-6').scanFreePages, 2, 'every scan engine is discounted')
+  assert.equal(home.quoteValues(1, 'GPT-5.6').scanFreePages, 0, 'A one-page scan is never free')
+  assert.equal(home.quoteValues(500, 'GPT-5.6').scanFreePages, 66, 'Capped at ¥20')
+  home.setData({ scanEngines: [], scanDiscountPercent: 0, scanDiscountCapFen: 0 })
   assert.equal(home.scanValues('Bing').scanWarn, false, 'Text PDFs show no scan note')
   assert.equal(home.quoteValues(10, 'GPT-5.6').scanFreePages, 0, 'Text PDFs are not discounted')
   // Output format: remembered, carried by the job, unknown values fall back to dual.
