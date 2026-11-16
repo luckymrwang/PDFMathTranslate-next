@@ -3,8 +3,9 @@
 It polls the gateway over HTTPS (no inbound port is needed), downloads the order's
 PDF, runs scan_pipeline (Apple OCR + vision model + in-place rewrite) and uploads
 the result, which the gateway delivers to the customer at once. Progress is sent
-every minute; it renews the order's lease, and a refunded or re-queued order makes
-the gateway answer 409, which stops the work here.
+whenever it changes (at most every few seconds) and at least every minute; it renews
+the order's lease, and a refunded or re-queued order makes the gateway answer 409,
+which stops the work here.
 
   python scan_worker.py run                   wait for orders forever (launchd runs this)
   python scan_worker.py adopt ORDER_ID        hand a failed/undelivered paid order to the worker
@@ -246,7 +247,15 @@ def on_terminate(signum, frame):
 
 
 class Heartbeat(threading.Thread):
-    """Sends the latest progress every minute and notices a lost lease."""
+    """Reports progress as it changes and renews the lease; notices a lost lease.
+
+    A new stage or percentage is sent within MIN_GAP seconds, so the customer sees the
+    work advance even on a short order; without changes it is resent every INTERVAL
+    seconds to keep the lease (20 minutes) alive.
+    """
+
+    INTERVAL = 60
+    MIN_GAP = 3
 
     def __init__(self, gateway: Gateway, order_id: str):
         super().__init__(daemon=True)
@@ -254,16 +263,32 @@ class Heartbeat(threading.Thread):
         self.stage, self.pct = "已开始处理", 0.0
         self.lost = threading.Event()
         self.done = threading.Event()
+        self.changed = threading.Event()
+        self.sent = (None, None)
+        self.sent_at = 0.0
 
     def update(self, stage: str, pct: float):
         self.stage, self.pct = stage, pct
+        self.changed.set()
 
     def run(self):
-        while not self.done.wait(60):
+        while not self.done.is_set():
+            self.changed.wait(self.INTERVAL)
+            self.changed.clear()
+            # Coalesce a burst of updates into one request.
+            gap = self.MIN_GAP - (time.monotonic() - self.sent_at)
+            if gap > 0 and self.done.wait(gap):
+                return
+            if self.done.is_set():
+                return
+            current = (self.stage, self.pct)
+            if current == self.sent and time.monotonic() - self.sent_at < self.INTERVAL:
+                continue  # nothing new and the lease is fresh
             try:
-                if not self.gateway.progress(self.order_id, self.stage, self.pct):
+                if not self.gateway.progress(self.order_id, *current):
                     self.lost.set()
                     return
+                self.sent, self.sent_at = current, time.monotonic()
             except Exception as exc:  # transient; the lease lasts 20 minutes
                 log.warning("progress report failed: %s", exc)
 
@@ -315,6 +340,7 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
         gateway.fail(order_id, f"{type(exc).__name__}: {exc}", retry=True)
     finally:
         beat.done.set()
+        beat.changed.set()  # wake it so it exits now
         forget(root)
     return 0
 

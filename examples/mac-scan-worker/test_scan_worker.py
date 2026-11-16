@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -69,6 +70,44 @@ class ScanWorkerTest(unittest.TestCase):
     def run_handle(self, fake, process):
         with mock.patch.object(scan_pipeline, "process", process):
             return scan_worker.handle(gateway_for(fake), object(), dict(JOB), self.root)
+
+    def test_progress_is_sent_when_it_changes_not_only_every_minute(self):
+        sent = []
+
+        class Recorder:
+            def progress(self, order_id, stage, pct):
+                sent.append((stage, pct))
+                return True
+
+        beat = scan_worker.Heartbeat(Recorder(), "T1")
+        beat.MIN_GAP, beat.INTERVAL = 0.05, 30  # a minute-long interval would never fire here
+        beat.start()
+        try:
+            for stage, pct in (("扶正页面", 2), ("翻译 1/2 页", 55), ("生成 PDF", 98)):
+                beat.update(stage, pct)
+                deadline = datetime.datetime.now() + datetime.timedelta(seconds=2)
+                while (stage, pct) not in sent and datetime.datetime.now() < deadline:
+                    threading.Event().wait(0.01)
+            self.assertEqual(sent[-1], ("生成 PDF", 98))
+            self.assertIn(("翻译 1/2 页", 55), sent)
+        finally:
+            beat.done.set()
+            beat.changed.set()
+            beat.join(2)
+        self.assertFalse(beat.is_alive(), "heartbeat must stop when the order ends")
+
+    def test_lost_lease_stops_the_heartbeat(self):
+        class Refused:
+            def progress(self, order_id, stage, pct):
+                return False
+
+        beat = scan_worker.Heartbeat(Refused(), "T1")
+        beat.MIN_GAP = 0
+        beat.start()
+        beat.update("翻译 1/2 页", 55)
+        self.assertTrue(beat.lost.wait(2))
+        beat.join(2)
+        self.assertFalse(beat.is_alive())
 
     def test_vision_model_follows_the_order_engine(self):
         with mock.patch.dict(os.environ, {}, clear=False):
