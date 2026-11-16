@@ -221,6 +221,25 @@ async function run() {
   assert.equal(await home.scanReadyToPay(), true, 'The user may still pay with a text-only engine')
   assert.equal(await home.scanReadyToPay(), true, 'and is asked only once for that engine')
   assert.equal(modals.length, 2)
+  // Paying for a scan with a text-only engine asks first and can switch the engine.
+  home.setData({ engines: ['Bing', 'GPT-5.6', 'GPT-6'], engine: 'Bing', paymentTotal: '0.00',
+    scanWarn: true, scanTarget: 'GPT-5.6', scanNames: 'GPT-5.6 或 GPT-6',
+    upgradeOptions: [{ engine: 'GPT-5.6', scanOk: true }] })
+  let ready = home.scanReadyToPay()
+  assert.equal(home.data.scanDialog, true, 'A scan on a text-only engine opens the check')
+  assert.match(home.data.scanOutcome, /积分自动退回/)
+  home.scanDialogSwitch({ currentTarget: { dataset: { engine: 'GPT-5.6' } } })
+  assert.equal(await ready, false, 'Choosing the scan engine stops this payment')
+  assert.equal(home.data.engine, 'GPT-5.6', 'and selects it')
+  assert.equal(home.data.scanDialog, false)
+  home.setData({ engine: 'Bing', scanWarn: true, scanTarget: 'GPT-5.6', scanNames: 'GPT-5.6 或 GPT-6' })
+  ready = home.scanReadyToPay()
+  home.scanDialogClose()
+  assert.equal(await ready, false, 'Closing the check does not pay')
+  ready = home.scanReadyToPay()
+  home.scanDialogContinue()
+  assert.equal(await ready, true, 'The user may still pay with a text-only engine')
+  assert.equal(await home.scanReadyToPay(), true, 'and is asked only once for that engine')
   // First scanned order: GPT quotes leave the first 3 pages out once the gateway offers it.
   home.setData({ scanFreeOffer: 0 })
   const sevenPages = home.quoteValues(7, 'GPT-5.6').paymentTotal
