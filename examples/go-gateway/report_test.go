@@ -205,8 +205,8 @@ func TestCustomerCodeIdentifiesTheBuyer(t *testing.T) {
 	if code := s.customerCode("openid-1234567890"); code != "ABCD2345" {
 		t.Fatalf("customer code = %q, want the invite code", code)
 	}
-	if code := s.customerCode("openid-0987654321"); code != "open…4321" {
-		t.Fatalf("a customer without an account should be masked, got %q", code)
+	if code := s.customerCode("openid-0987654321"); code != "" {
+		t.Fatalf("a customer without an invite code should be left out, got %q", code)
 	}
 	if code := s.customerCode(""); code != "" {
 		t.Fatalf("no owner means no customer line, got %q", code)

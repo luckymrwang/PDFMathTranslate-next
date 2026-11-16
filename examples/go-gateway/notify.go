@@ -133,23 +133,16 @@ func (s *Server) orderSummary(o PayOrder) string {
 	return orderSummary(o, s.customerCode(o.OpenID))
 }
 
-// customerCode is the ID an operator can quote back to the customer. Every
-// customer that logs in has an invite code; without a stored account the OpenID
-// is masked instead of being printed whole.
+// customerCode is the ID an operator can quote back to the customer: the invite
+// code every logged-in customer has. Without one the alert says nothing about
+// the customer rather than printing an OpenID.
 func (s *Server) customerCode(openid string) string {
 	if openid == "" || s.pay == nil || s.pay.referrals == nil || s.pay.referrals.db == nil {
 		return ""
 	}
 	var code string
 	if err := s.pay.referrals.db.QueryRow("SELECT code FROM referral_users WHERE openid=?", openid).Scan(&code); err != nil {
-		return maskOpenID(openid)
+		return ""
 	}
 	return code
-}
-
-func maskOpenID(openid string) string {
-	if len(openid) <= 8 {
-		return openid
-	}
-	return openid[:4] + "…" + openid[len(openid)-4:]
 }
