@@ -128,15 +128,16 @@ func (s *Server) advancePaidOrder(ctx context.Context, id string, wait bool) err
 		_, err := s.startPaidOrderLocked(ctx, id)
 		return err
 	}
-	state, errorType, err := s.upstreamTaskState(ctx, order.TaskID)
+	status, err := s.upstreamTaskState(ctx, order.TaskID)
 	if err != nil {
 		return err
 	}
+	state, errorType := status.State, status.ErrorType
 	switch state {
 	case "queued", "running":
 		return nil
 	case "finished":
-		if err := s.archivePaidResult(ctx, order); !errors.Is(err, errNoResult) {
+		if err := s.archivePaidResult(ctx, order, status.Untranslated); !errors.Is(err, errNoResult) {
 			return err
 		}
 	case "error":
@@ -277,23 +278,23 @@ func paidFailureMessage(order PayOrder) string {
 	return "翻译多次失败，请联系客服处理退款"
 }
 
-func (s *Server) upstreamTaskState(ctx context.Context, taskID string) (string, string, error) {
+func (s *Server) upstreamTaskState(ctx context.Context, taskID string) (upstreamStatus, error) {
 	resp, err := s.pdf2zh.Request(ctx, http.MethodGet, "/v1/translate/"+taskID)
 	if err != nil {
-		return "", "", err
+		return upstreamStatus{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return "missing", "", nil
+		return upstreamStatus{State: "missing"}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("translation status %d", resp.StatusCode)
+		return upstreamStatus{}, fmt.Errorf("translation status %d", resp.StatusCode)
 	}
 	var st upstreamStatus
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st); err != nil {
-		return "", "", err
+		return upstreamStatus{}, err
 	}
-	return st.State, st.ErrorType, nil
+	return st, nil
 }
 
 func (s *Server) deleteUpstreamTask(ctx context.Context, taskID string) {
@@ -359,7 +360,7 @@ func (s *Server) expireOrder(ctx context.Context, id string) error {
 	})
 }
 
-func (s *Server) archivePaidResult(ctx context.Context, order PayOrder) error {
+func (s *Server) archivePaidResult(ctx context.Context, order PayOrder, untranslated int) error {
 	dir := filepath.Join(s.pay.store.dir, "results")
 	mono, err := s.saveResult(ctx, order.TaskID, "mono", filepath.Join(dir, order.ID+"-mono.pdf"))
 	if err != nil {
@@ -378,6 +379,7 @@ func (s *Server) archivePaidResult(ctx context.Context, order PayOrder) error {
 		}
 		current.MonoFile, current.DualFile, current.Delivery = mono, dual, "archived"
 		current.DeliveredAt = time.Now().Unix()
+		current.Untranslated = untranslated
 		return nil
 	})
 	if err != nil {
@@ -386,7 +388,21 @@ func (s *Server) archivePaidResult(ctx context.Context, order PayOrder) error {
 	if err := s.uploadArchived(ctx, order.ID); err != nil {
 		log.Printf("result upload to object storage deferred (order=%s): %v", order.ID, err)
 	}
+	if untranslated > 0 {
+		s.alertUntranslated(order, untranslated)
+	}
 	return nil
+}
+
+// alertUntranslated tells the operator that a delivered result kept some paragraphs in
+// the source language because the translation service failed on them (e.g. Bing
+// resetting connections). The order is still delivered; the operator decides whether to
+// rerun it, which only retranslates the missing paragraphs thanks to the cache.
+func (s *Server) alertUntranslated(order PayOrder, untranslated int) {
+	log.Printf("delivered with untranslated paragraphs (order=%s, paragraphs=%d)", order.ID, untranslated)
+	s.notify(fmt.Sprintf("译文有 %d 段漏翻，请检查", untranslated), orderSummary(order)+
+		fmt.Sprintf("\n翻译服务对 %d 个段落请求失败，这些段落保留了原文；译文已交付给用户。", untranslated)+
+		"\n可重跑补翻（已翻译的段落有缓存，只会重翻失败的部分），或改用其他引擎。")
 }
 
 // uploadArchived moves archived results into object storage, then frees the

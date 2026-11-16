@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func paidOrderFixture(t *testing.T, s *Server, id, taskID string, attempts int) PayOrder {
@@ -127,6 +128,46 @@ func TestPaidOrderFailsAfterMaxAttempts(t *testing.T) {
 	s.handleTranslateTask(w, ownRequest("GET", "/api/translate/task-9", "owner", nil))
 	if !strings.Contains(w.Body.String(), `"state":"error"`) {
 		t.Fatalf("failed order not reported: %s", w.Body.String())
+	}
+}
+
+func TestUntranslatedParagraphsAreDeliveredAndAlerted(t *testing.T) {
+	for _, untranslated := range []int{0, 2} {
+		alerts := newAlertSink(t)
+		s := testPayServer(t)
+		python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/translate/task-u":
+				writeJSON(w, 200, map[string]any{"state": "finished", "untranslated_paragraphs": untranslated})
+			case "/v1/translate/task-u/mono":
+				_, _ = io.WriteString(w, "%PDF-mono")
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		s.pdf2zh = NewPdf2zhClient(python.URL)
+		order := paidOrderFixture(t, s, "Tuntr", "task-u", 0)
+
+		if err := s.advancePaidOrder(context.Background(), order.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		python.Close()
+		done, _ := s.pay.store.get(order.ID)
+		if done.Delivery != "archived" || done.Untranslated != untranslated {
+			t.Fatalf("partial result must still be delivered with its count: %+v", done)
+		}
+		if untranslated > 0 {
+			alerts.wait(t, "2 段漏翻")
+		} else {
+			time.Sleep(50 * time.Millisecond)
+			alerts.mu.Lock()
+			for _, title := range alerts.titles {
+				if strings.Contains(title, "漏翻") {
+					t.Errorf("complete result must not alert: %q", title)
+				}
+			}
+			alerts.mu.Unlock()
+		}
 	}
 }
 

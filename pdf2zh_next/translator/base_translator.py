@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import re
+import threading
 from abc import ABC
 from abc import abstractmethod
 
@@ -51,6 +52,25 @@ class BaseTranslator(ABC):
 
         self.translate_call_count = 0
         self.translate_cache_call_count = 0
+        # Texts whose last translate() call raised. BabelDOC keeps such a paragraph in
+        # the source language, so this is the number of untranslated paragraphs; a
+        # later successful call for the same text (a retry) clears it.
+        self._failed_texts: set[str] = set()
+        self._failed_lock = threading.Lock()
+
+    @property
+    def untranslated_count(self) -> int:
+        with self._failed_lock:
+            return len(self._failed_texts)
+
+    def _record_outcome(self, text, failed: bool) -> None:
+        if not isinstance(text, str):
+            return
+        with self._failed_lock:
+            if failed:
+                self._failed_texts.add(text)
+            else:
+                self._failed_texts.discard(text)
 
     def __del__(self):
         with contextlib.suppress(Exception):
@@ -75,6 +95,15 @@ class BaseTranslator(ABC):
         :param text: text to translate
         :return: translated text
         """
+        try:
+            translation = self._translate(text, ignore_cache, rate_limit_params)
+        except Exception:
+            self._record_outcome(text, failed=True)
+            raise
+        self._record_outcome(text, failed=False)
+        return translation
+
+    def _translate(self, text, ignore_cache, rate_limit_params):
         self.translate_call_count += 1
         if not (self.ignore_cache or ignore_cache):
             try:

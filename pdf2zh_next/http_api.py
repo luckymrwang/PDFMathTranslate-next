@@ -127,6 +127,8 @@ class TaskState:
     dual_path: Path | None = None
     total_seconds: float | None = None
     token_usage: dict[str, Any] = field(default_factory=dict)
+    # Paragraphs the translator failed on, left in the source language.
+    untranslated_paragraphs: int = 0
     done: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     subscribers: set[asyncio.Queue] = field(default_factory=set)
@@ -240,6 +242,7 @@ def _serialize_event(event: dict[str, Any], task: TaskState) -> dict[str, Any]:
         task.dual_path = Path(dual) if dual else None
         task.total_seconds = getattr(result, "total_seconds", None)
         task.token_usage = event.get("token_usage", {}) or {}
+        task.untranslated_paragraphs = int(event.get("untranslated_paragraphs") or 0)
         task.status = "finished"
         task.progress = 100.0
         return {
@@ -248,6 +251,7 @@ def _serialize_event(event: dict[str, Any], task: TaskState) -> dict[str, Any]:
             "mono_url": f"/v1/translate/{task.task_id}/mono" if mono else None,
             "dual_url": f"/v1/translate/{task.task_id}/dual" if dual else None,
             "token_usage": task.token_usage,
+            "untranslated_paragraphs": task.untranslated_paragraphs,
         }
 
     if etype == "error":
@@ -633,6 +637,7 @@ async def get_status(task_id: str) -> dict[str, Any]:
         "error_type": task.error_type,
         "total_seconds": task.total_seconds,
         "token_usage": task.token_usage,
+        "untranslated_paragraphs": task.untranslated_paragraphs,
         "mono_url": f"/v1/translate/{task.task_id}/mono" if task.mono_path else None,
         "dual_url": f"/v1/translate/{task.task_id}/dual" if task.dual_path else None,
     }

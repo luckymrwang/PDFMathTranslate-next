@@ -281,6 +281,12 @@ def _translate_wrapper(
                             ]
 
                         event["token_usage"] = token_usage
+                        # Paragraphs left in the source language because the
+                        # translator failed on them (LLM batch calls are not counted:
+                        # BabelDOC falls back to per-paragraph translation for those).
+                        event["untranslated_paragraphs"] = getattr(
+                            config.translator, "untranslated_count", 0
+                        )
                         pipe_progress_send.send(event)
                         break
                     pipe_progress_send.send(event)

@@ -222,6 +222,9 @@ type PayOrder struct {
 	// DeliveredAt starts the result retention period (falls back to CreatedAt).
 	DeliveredAt          int64
 	CreatedAt, LastQuery int64
+	// Untranslated is how many paragraphs the delivered result kept in the source
+	// language because the translation service failed on them.
+	Untranslated int
 	// Delivery is "" while translating, "archived" once results are durable, "failed" when retries are exhausted.
 	Delivery           string
 	FailReason         string
