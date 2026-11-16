@@ -9,7 +9,7 @@ import (
 // the mini-program or accepted from its multipart request.
 func availableEngines() map[string]map[string]string {
 	engines := map[string]map[string]string{
-		"Bing": {"translate_engine_type": "Bing"},
+		"Bing": bingSettings(),
 	}
 	// The keyless Google endpoint is rate-limited on most datacenter IPs, so
 	// Google is offered only with an API key or when explicitly enabled.
@@ -63,6 +63,23 @@ func availableEngines() map[string]map[string]string {
 		}
 	}
 	return engines
+}
+
+// bingSettings is the free "Bing" product. With an Azure Translator key it runs on Azure's
+// free tier (a stable official API) and falls back to scraping Bing when the monthly
+// quota is used up or Azure fails; without a key it is plain Bing as before.
+func bingSettings() map[string]string {
+	key := os.Getenv("AZURE_TRANSLATOR_KEY")
+	if key == "" {
+		return map[string]string{"translate_engine_type": "Bing"}
+	}
+	return map[string]string{
+		"translate_engine_type": "Azure",
+		"azure_api_key":         key,
+		"azure_endpoint":        getenv("AZURE_TRANSLATOR_ENDPOINT", "https://api.cognitive.microsofttranslator.com"),
+		"azure_region":          getenv("AZURE_TRANSLATOR_REGION", "global"),
+		"azure_fallback_bing":   "true",
+	}
 }
 
 func (s *Server) handleEngines(w http.ResponseWriter, r *http.Request) {

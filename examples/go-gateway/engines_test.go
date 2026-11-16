@@ -97,3 +97,34 @@ func TestDeepSeekBaseUrlForwarded(t *testing.T) {
 		t.Fatalf("submit failed: status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestBingUsesAzureWithBingFallbackWhenKeyed(t *testing.T) {
+	t.Setenv("AZURE_TRANSLATOR_KEY", "azure-secret")
+	t.Setenv("AZURE_TRANSLATOR_REGION", "japaneast")
+	settings := availableEngines()["Bing"]
+	want := map[string]string{
+		"translate_engine_type": "Azure",
+		"azure_api_key":         "azure-secret",
+		"azure_endpoint":        "https://api.cognitive.microsofttranslator.com",
+		"azure_region":          "japaneast",
+		"azure_fallback_bing":   "true",
+	}
+	for k, v := range want {
+		if settings[k] != v {
+			t.Errorf("%s = %q, want %q", k, settings[k], v)
+		}
+	}
+	w := httptest.NewRecorder()
+	(&Server{}).handleEngines(w, httptest.NewRequest(http.MethodGet, "/api/engines", nil))
+	if !bytes.Contains(w.Body.Bytes(), []byte("Bing")) || bytes.Contains(w.Body.Bytes(), []byte("azure-secret")) {
+		t.Fatalf("catalog must list Bing and hide the key: %s", w.Body.String())
+	}
+}
+
+func TestBingStaysPlainWithoutAzureKey(t *testing.T) {
+	t.Setenv("AZURE_TRANSLATOR_KEY", "")
+	settings := availableEngines()["Bing"]
+	if len(settings) != 1 || settings["translate_engine_type"] != "Bing" {
+		t.Fatalf("unexpected Bing settings: %v", settings)
+	}
+}

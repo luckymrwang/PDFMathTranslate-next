@@ -559,12 +559,21 @@ class AzureSettings(BaseModel):
         default="https://api.translator.azure.cn", description="Azure endpoint"
     )
     azure_api_key: str | None = Field(default=None, description="Azure API Key")
+    azure_region: str | None = Field(
+        default="chinaeast2",
+        description="Azure resource region, e.g. japaneast, or global",
+    )
+    azure_fallback_bing: bool = Field(
+        default=False,
+        description="Translate with Bing when Azure is unavailable (quota used up, errors)",
+    )
 
     def validate_settings(self) -> None:
         if not self.azure_api_key:
             raise ValueError("Azure API key is required")
         self.azure_api_key = _clean_string(self.azure_api_key)
         self.azure_endpoint = _clean_string(self.azure_endpoint)
+        self.azure_region = _clean_string(self.azure_region)
 
 
 GUI_PASSWORD_FIELDS.append("azure_api_key")
