@@ -53,6 +53,13 @@ class BabeldocError(TranslationError):
         return super().__str__()
 
 
+class DocumentTooComplexError(BabeldocError):
+    """The PDF exceeds BabelDOC's parser resource limits (ParserResourceLimitError).
+
+    BabelDOC rejects such a document deterministically, so retrying cannot help.
+    """
+
+
 class SubprocessError(TranslationError):
     """Error occurring in the translation subprocess outside of babeldoc."""
 
@@ -173,8 +180,14 @@ def _translate_wrapper(
                     logger.debug(f"sub process generate event: {event}")
                     if event["type"] == "error":
                         # Convert babeldoc error to structured exception
-                        error_msg = str(event.get("error", "Unknown babeldoc error"))
-                        error = BabeldocError(
+                        original = event.get("error", "Unknown babeldoc error")
+                        error_msg = str(original)
+                        error_class = (
+                            DocumentTooComplexError
+                            if type(original).__name__ == "ParserResourceLimitError"
+                            else BabeldocError
+                        )
+                        error = error_class(
                             message=f"Babeldoc translation error: {error_msg}",
                             original_error=error_msg,
                         )

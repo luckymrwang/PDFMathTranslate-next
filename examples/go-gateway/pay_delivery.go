@@ -61,6 +61,12 @@ const alreadyTranslated = "already_translated"
 
 const msgAlreadyTranslated = "该文件已是翻译后的译文 PDF，请上传原始文档"
 
+// documentTooComplex is the Python API's error_type when BabelDOC rejects a PDF for
+// exceeding its parser resource limits. The rejection is deterministic: never retried.
+const documentTooComplex = "document_too_complex"
+
+const msgDocumentTooComplex = "该 PDF 结构过于复杂，超出解析上限，无法翻译"
+
 // orderLocks serializes work per order so one slow submission never blocks other orders.
 type orderLocks struct {
 	mu sync.Mutex
@@ -134,9 +140,9 @@ func (s *Server) advancePaidOrder(ctx context.Context, id string, wait bool) err
 			return err
 		}
 	case "error":
-		if errorType == alreadyTranslated {
+		if errorType == alreadyTranslated || errorType == documentTooComplex {
 			s.deleteUpstreamTask(ctx, order.TaskID)
-			return s.failPaidOrder(id, alreadyTranslated)
+			return s.failPaidOrder(id, errorType)
 		}
 	}
 	log.Printf("paid translation task lost or failed, retrying (order=%s, state=%s)", id, state)
@@ -242,6 +248,9 @@ func paidFailureMessage(order PayOrder) string {
 		if order.FailReason == alreadyTranslated {
 			return msgAlreadyTranslated + "；本单积分已退回"
 		}
+		if order.FailReason == documentTooComplex {
+			return msgDocumentTooComplex + "；本单积分已退回"
+		}
 		if order.Scanned && !isScanEngine(order.Engine) {
 			return msgScanPointsFailed
 		}
@@ -251,10 +260,16 @@ func paidFailureMessage(order PayOrder) string {
 		if order.FailReason == alreadyTranslated {
 			return msgAlreadyTranslated
 		}
+		if order.FailReason == documentTooComplex {
+			return msgDocumentTooComplex
+		}
 		return "免费试译失败，请联系客服处理"
 	}
 	if order.FailReason == alreadyTranslated {
 		return msgAlreadyTranslated + "；本单请联系客服退款"
+	}
+	if order.FailReason == documentTooComplex {
+		return msgDocumentTooComplex + "；本单请联系客服退款"
 	}
 	if order.Scanned || order.FailReason == scanFailReason {
 		return msgScanFailed

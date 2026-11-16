@@ -17,8 +17,8 @@ classifiers = [
 ]
 dependencies = [
     "requests",
-    # for arm64 linux whells
-    "pymupdf<1.25.3",
+    # BabelDOC 0.7 requires PyMuPDF 1.26.7+ and does not support 2.x.
+    "pymupdf>=1.26.7,<2",
     "tqdm",
     "tenacity",
     "numpy",
@@ -33,7 +33,7 @@ dependencies = [
     "gradio-pdf>=0.0.21",
     "peewee>=3.17.8",
     "fontTools",
-    "babeldoc>=0.6.2,<0.7.0",
+    "babeldoc>=0.7.1,<0.8",
     "rich",
     "pydantic-settings>=2.8.1",
     "pydantic>=2.10.6",

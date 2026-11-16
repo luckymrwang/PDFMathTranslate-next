@@ -20,8 +20,7 @@ RUN apt-get update && \
      rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
-# BabelDOC 0.6 imports BitStream, which bitstring 5 removed.
-RUN uv pip install --system --no-cache -r pyproject.toml "bitstring<5" && babeldoc --version && babeldoc --warmup
+RUN uv pip install --system --no-cache -r pyproject.toml && babeldoc --version && babeldoc --warmup
 
 COPY . .
 
@@ -29,9 +28,8 @@ COPY . .
 # (https://stackoverflow.com/questions/35134713/disable-cache-for-specific-run-commands/58801213#58801213)
 ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
 
-# bitstring<5: bitstring 5.0 removed BitStream, which babeldoc still imports
-# (babeldoc declares bitstring>=4.3.0 with no upper bound).
-RUN uv pip install --system --no-cache . && uv pip install --system --no-cache --compile-bytecode -U babeldoc "pymupdf<1.25.3" "bitstring<5" && babeldoc --version && babeldoc --warmup
+# Keep these ranges in sync with pyproject.toml.
+RUN uv pip install --system --no-cache . && uv pip install --system --no-cache --compile-bytecode -U "babeldoc>=0.7.1,<0.8" "pymupdf>=1.26.7,<2" && babeldoc --version && babeldoc --warmup
 RUN pdf2zh --version
 # Default: Gradio WebUI. For the translation HTTP API service, override at runtime:
 #   docker run -p 11008:11008 <image> pdf2zh --api

@@ -130,6 +130,30 @@ func TestPaidOrderFailsAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestDocumentTooComplexFailsWithoutRetry(t *testing.T) {
+	s := testPayServer(t)
+	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			t.Error("a PDF rejected by the parser limits must not be resubmitted")
+		}
+		writeJSON(w, 200, map[string]any{"state": "error", "error_type": documentTooComplex})
+	}))
+	defer python.Close()
+	s.pdf2zh = NewPdf2zhClient(python.URL)
+	order := paidOrderFixture(t, s, "Tcomplex", "task-c", 0)
+
+	if err := s.advancePaidOrder(context.Background(), order.ID, true); err != errPaidFailed {
+		t.Fatalf("expected immediate failure, got %v", err)
+	}
+	failed, _ := s.pay.store.get(order.ID)
+	if failed.Delivery != "failed" || failed.FailReason != documentTooComplex || failed.Attempts != 0 {
+		t.Fatalf("not failed on the first attempt: %+v", failed)
+	}
+	if msg := paidFailureMessage(failed); !strings.Contains(msg, msgDocumentTooComplex) {
+		t.Fatalf("user message does not explain the rejection: %q", msg)
+	}
+}
+
 func TestCancelledOrderHiddenButLatePaymentRevives(t *testing.T) {
 	s := testPayServer(t)
 	var paid sync.Mutex

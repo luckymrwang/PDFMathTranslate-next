@@ -23,11 +23,10 @@ RUN uv pip install --python /opt/venv --no-deps .
 # Refresh babeldoc/pymupdf, mirroring the root Dockerfile but with a build
 # ARG instead of the random.org ADD (unreachable from CN networks, and its
 # timeout would fail the whole build). compose passes CACHEBUST per deploy.
-# bitstring<5: bitstring 5.0 removed BitStream, which babeldoc still imports
-# (babeldoc declares bitstring>=4.3.0 with no upper bound).
+# Keep these ranges in sync with pyproject.toml.
 ARG CACHEBUST=1
 RUN uv pip install --python /opt/venv --compile-bytecode -U \
-        "babeldoc>=0.6.2,<0.7.0" "pymupdf<1.25.3" "bitstring<5"
+        "babeldoc>=0.7.1,<0.8" "pymupdf>=1.26.7,<2"
 
 ########## Stage 2: minimal runtime ##########
 FROM python:3.13-slim-bookworm
