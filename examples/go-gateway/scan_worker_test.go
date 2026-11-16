@@ -445,7 +445,7 @@ func TestLongPollWakesWhenAnOrderIsQueued(t *testing.T) {
 	case w := <-done:
 		var job map[string]any
 		json.Unmarshal(w.Body.Bytes(), &job)
-		if w.Code != 200 || job["id"] != order.ID || job["full_qa"] != false {
+		if w.Code != 200 || job["id"] != order.ID || job["full_qa"] != true {
 			t.Fatal("woken long poll did not return the order", w.Code, w.Body.String())
 		}
 	case <-time.After(3 * time.Second):
@@ -461,14 +461,14 @@ func TestLargeOrderHeldForReviewThenReleased(t *testing.T) {
 	alerts := newAlertSink(t)
 	s := testPayServer(t)
 	order := scanOrderFixture(t, s, "GPT-6", "dual")
-	s.pay.store.update(order.ID, func(c *PayOrder) error { c.Pages = 76; return nil }) // 76 × ¥0.4 > ¥30
+	s.pay.store.update(order.ID, func(c *PayOrder) error { c.Pages = 76; return nil })
 	taskID, _ := s.startPaidOrder(context.Background(), order.ID)
 	alerts.wait(t, "已交给 Mac")
 	w := workerCall(s, "POST", "/worker/scan/claim", nil, "")
 	var job map[string]any
 	json.Unmarshal(w.Body.Bytes(), &job)
 	if job["full_qa"] != true {
-		t.Fatal("a ¥30.4 order must get full quality control", w.Body.String())
+		t.Fatal("every scanned order must get full quality control", w.Body.String())
 	}
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -509,11 +509,5 @@ func TestLargeOrderHeldForReviewThenReleased(t *testing.T) {
 	}
 	if w = workerCall(s, "POST", "/worker/scan/"+order.ID+"/release", nil, ""); w.Code != http.StatusConflict {
 		t.Fatal("a delivered order was released twice", w.Code)
-	}
-}
-
-func TestSmallOrderSkipsFullQualityControl(t *testing.T) {
-	if scanFullQA(PayOrder{Pages: 75}) || !scanFullQA(PayOrder{Pages: 76}) {
-		t.Fatal("threshold must be pages × ¥0.4 > ¥30")
 	}
 }

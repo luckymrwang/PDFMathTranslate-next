@@ -288,6 +288,88 @@ class ScanWorkerTest(unittest.TestCase):
                 scan_pipeline.translate_page(job, None, work / "up.pdf", work / "ocr.pdf", 0)
         self.assertFalse(damaged.exists(), "a half-written cache file must be dropped, not crash every retry")
 
+    def _page_pdf(self, path, lines):
+        doc = scan_pipeline.pymupdf.open()
+        page = doc.new_page(width=400, height=300)
+        for n, text in enumerate(lines):
+            page.insert_text((20, 40 + 30 * n), text, fontsize=12)
+        doc.save(path)
+        return path
+
+    def _model(self, answers, refuse_temperature=False):
+        calls = []
+
+        def create(model, messages, **kwargs):  # noqa: ARG001 - mirrors the OpenAI signature
+            calls.append({"system": messages[0]["content"], "kwargs": kwargs,
+                          "images": sum(c["type"] == "image_url" for c in messages[1]["content"])})
+            if refuse_temperature and "temperature" in kwargs:
+                raise RuntimeError("Unsupported parameter: 'temperature'")
+            msg = mock.Mock(content=json.dumps(answers.pop(0), ensure_ascii=False))
+            return mock.Mock(choices=[mock.Mock(message=msg)])
+
+        client = mock.Mock()
+        client.chat.completions.create = create
+        return client, calls
+
+    def _job(self, name, shared=None):
+        work = self.root / name
+        (work / "cache").mkdir(parents=True)
+        return scan_pipeline.Job(source=work / "src.pdf", workdir=work, shared_cache=shared)
+
+    def test_same_page_is_translated_once_across_orders(self):
+        pdf = self._page_pdf(self.root / "page.pdf", ["Hello world again", "Second line here"])
+        shared = self.root / "_shared"
+        answer = {"groups": [{"ids": [0, 1], "tr": "你好"}], "keep": []}
+        client, calls = self._model([answer])
+        first = scan_pipeline.translate_page(self._job("o1", shared), client, pdf, pdf, 0)
+        second = scan_pipeline.translate_page(self._job("o2", shared), client, pdf, pdf, 0)
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 1, "the second order must reuse the first translation")
+        self.assertEqual(calls[0]["kwargs"], {"temperature": 0})
+        # A redo after a failed quality check asks the model again and replaces the entry.
+        client, calls = self._model([{"groups": [{"ids": [0, 1], "tr": "您好"}], "keep": []}])
+        redo = scan_pipeline.translate_page(self._job("o3", shared), client, pdf, pdf, 0, feedback=["译文生硬"])
+        self.assertEqual(len(calls), 1)
+        later = scan_pipeline.translate_page(self._job("o4", shared), client, pdf, pdf, 0)
+        self.assertEqual(redo, later)
+
+    def test_logo_lines_kept_by_the_model_are_not_reasked_or_flagged(self):
+        pdf = self._page_pdf(self.root / "logo.pdf", ["National University of Singapore", "This course is about statistics"])
+        client, calls = self._model([{"groups": [{"ids": [1], "tr": "本课程讲统计"}], "keep": [0]}])
+        result = scan_pipeline.translate_page(self._job("o1"), client, pdf, pdf, 0)
+        self.assertEqual(len(calls), 1, "a kept logo line must not trigger the orphan pass")
+        self.assertEqual(result["keep"], [0])
+        lines = scan_pipeline.ocr_lines(scan_pipeline.pymupdf.open(pdf)[0])
+        self.assertEqual(scan_pipeline.rule_issues(lines, result, []), [])
+
+    def test_orphan_pass_sees_the_page(self):
+        pdf = self._page_pdf(self.root / "orphan.pdf", ["First real sentence here", "Another real sentence here"])
+        client, calls = self._model([{"groups": [{"ids": [0], "tr": "第一句"}], "keep": []},
+                                     {"covered": [], "groups": [{"ids": [1], "tr": "第二句"}]}])
+        result = scan_pipeline.translate_page(self._job("o1"), client, pdf, pdf, 0)
+        self.assertEqual(len(result["groups"]), 2)
+        self.assertEqual([c["images"] for c in calls], [1, 1])
+        self.assertIn("logo", calls[1]["system"])
+
+    def test_endpoint_refusing_temperature_still_works(self):
+        pdf = self._page_pdf(self.root / "temp.pdf", ["Hello world again"])
+        job = self._job("o1")
+        client, calls = self._model([{"groups": [{"ids": [0], "tr": "你好"}], "keep": []}], refuse_temperature=True)
+        scan_pipeline.translate_page(job, client, pdf, pdf, 0)
+        self.assertIsNone(job.temperature)
+        self.assertEqual([c["kwargs"] for c in calls], [{"temperature": 0}, {}])
+
+    def test_unused_shared_entries_are_pruned(self):
+        shared = self.root / scan_worker.SHARED_DIR
+        old, fresh = shared / "pages" / "old.json", shared / "pages" / "new.json"
+        old.parent.mkdir(parents=True)
+        old.write_text("{}")
+        fresh.write_text("{}")
+        os.utime(old, (0, 0))
+        scan_worker.prune(self.root)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists() and shared.exists(), "the shared cache itself must survive pruning")
+
     def test_pause_seconds_reads_reset_time(self):
         later = (datetime.datetime.now() + datetime.timedelta(minutes=30)).strftime("%H:%M")
         seconds = scan_worker.pause_seconds(f"not asked again before {later} UTC+8")

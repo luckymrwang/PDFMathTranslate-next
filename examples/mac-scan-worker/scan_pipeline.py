@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -23,6 +24,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,7 +44,8 @@ FONTS = {"ja": "SourceHanSansJP", "ko": "SourceHanSansKR"}  # everything else: S
 
 SYSTEM = """你是专业的文档译者。用户会发来一页扫描文档的图片，以及从图上 OCR 出来的文字行列表（JSON，每行有 id、text 和 box=[x0,y0,x1,y1]，单位 pt，页面宽高为 {width}x{height}）。
 请结合图片，把文字从{source}翻译成{target}，只输出一个 JSON 对象：
-{{"groups": [{{"ids": [<id>, ...], "tr": "<译文>"}}, ...]}}
+{{"groups": [{{"ids": [<id>, ...], "tr": "<译文>"}}, ...], "keep": [<id>, ...]}}
+其中 keep 列出按下面规则特意保持原样、不翻译的文字行（logo、签名、人名等），没有就给空数组。
 
 分组规则：
 - 同一句话/同一段落因换行被拆成的多行（上下相邻、对齐、属于同一段）合并为一组，ids 按阅读顺序列出。
@@ -50,6 +53,7 @@ SYSTEM = """你是专业的文档译者。用户会发来一页扫描文档的�
 - 带文字的标题要翻译（如 “Section 14.1” 译为 “第14.1条”，“ARTICLE 14” 译为 “第14条”）。
 - 表格的不同行、不同单元格、不同卡片、不同项目符号条目一律分开，不要合并。
 - 每个 id 只能出现在一个组里；不需要翻译的行（纯数字、金额、百分比、日期数字、公式、代码、页码、签名、logo）不要输出。
+- logo 一律保持原样：标志、徽章、印章里的文字，以及与标志排在一起构成标识的机构名、院系名、品牌名、口号（如校徽下方的校名、标志右侧的“学院名 + 校名”组合）都算 logo，不要输出。正文、标题、表格里提到的机构名照常翻译。
 
 翻译要求：
 - OCR 可能有错字，以图片为准纠正后再翻译。
@@ -84,7 +88,12 @@ class Job:
     glossary: str = ""
     progress: Callable[[str, float], None] = lambda stage, pct: None
     should_stop: Callable[[], bool] = lambda: False
-    full_qa: bool = False  # glossary + rule checks + vision review + one redo (large orders)
+    full_qa: bool = False  # glossary + rule checks + vision review + one redo
+    # Page translations and glossaries shared across orders, keyed by the OCR content,
+    # model, languages and prompts: the same file ordered again gets the same result.
+    shared_cache: Path | None = None
+    # 0 keeps answers as repeatable as the model allows; dropped if the endpoint refuses it.
+    temperature: float | None = 0
     report: dict = field(default_factory=dict)
     results: dict = field(default_factory=dict)
     exhausted: set = field(default_factory=set)
@@ -95,6 +104,42 @@ def write_atomic(path: Path, text: str):
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text)
     os.replace(tmp, path)
+
+
+def _shared_path(job: Job, kind: str, *parts) -> Path | None:
+    """Cross-order cache file for this content, or None when sharing is off."""
+    if job.shared_cache is None:
+        return None
+    digest = hashlib.sha256(json.dumps(
+        [kind, job.model, job.lang_in, job.lang_out, *parts], ensure_ascii=False, sort_keys=True,
+        default=str).encode()).hexdigest()
+    return job.shared_cache / kind / f"{digest}.json"
+
+
+def _read_shared(path: Path | None):
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        path.unlink(missing_ok=True)
+        return None
+    os.utime(path)  # recently used entries survive pruning
+    return data
+
+
+def _write_shared(path: Path | None, data):
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, json.dumps(data, ensure_ascii=False))
+
+
+def prune_shared(root: Path, days: int = 30):
+    """Drop shared cache entries nobody used for `days` days."""
+    cutoff = time.time() - days * 86400
+    for path in root.glob("*/*.json"):
+        if path.stat().st_mtime < cutoff:
+            path.unlink(missing_ok=True)
 
 
 def _check(job: Job):
@@ -243,7 +288,7 @@ ORPHAN_PROMPT = """
 对每个漏掉的行：
 - 如果它的内容已经包含在某个 existing 组的译文里（通常是同一段落的续行），把它的 id 放进 covered；
 - 否则如果需要翻译，按同样规则输出新的组；
-- 纯数字、签名、人名等不需要翻译的行，既不放进 covered 也不输出。
+- 纯数字、签名、人名、logo（含与标志排在一起构成标识的机构名、院系名、品牌名）等不需要翻译的行，既不放进 covered 也不输出；拿不准时对照图片，属于标识的一律不输出。
 只输出 JSON：{"covered": [<id>, ...], "groups": [{"ids": [<id>, ...], "tr": "<译文>"}]}"""
 
 
@@ -279,8 +324,16 @@ def _chat(job: Job, client, system: str, payload, images: list[str], what: str, 
             text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
             content = [{"type": "text", "text": text}]
             content += [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}} for img in images]
-            resp = client.chat.completions.create(model=models[0], messages=[
-                {"role": "system", "content": system}, {"role": "user", "content": content}])
+            extra = {} if job.temperature is None else {"temperature": job.temperature}
+            try:
+                resp = client.chat.completions.create(model=models[0], messages=[
+                    {"role": "system", "content": system}, {"role": "user", "content": content}], **extra)
+            except Exception as exc:
+                if not extra or "temperature" not in str(exc).lower():
+                    raise
+                job.temperature = None  # this model/endpoint only takes its default
+                resp = client.chat.completions.create(model=models[0], messages=[
+                    {"role": "system", "content": system}, {"role": "user", "content": content}])
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", (resp.choices[0].message.content or "").strip())
             result = json.loads(raw)
             if not isinstance(result, dict) or key not in result:
@@ -325,6 +378,13 @@ def translate_page(job: Job, client, upright_path: Path, ocr_path: Path, index: 
         page = pymupdf.open(upright_path)[index]
         image = _jpeg(page)
         items = [{"id": i, "text": l["text"], "box": [round(v) for v in l["bbox"]]} for i, l in enumerate(lines)]
+        shared = _shared_path(job, "pages", items, round(page.rect.width), round(page.rect.height),
+                              SYSTEM, ORPHAN_PROMPT, job.glossary)
+        # A redo after a failed quality check must not get the rejected answer back.
+        cached = None if feedback else _read_shared(shared)
+        if cached is not None:
+            write_atomic(cache, json.dumps(cached, ensure_ascii=False))
+            return cached
         redo = ""
         if feedback:
             redo = "\n\n上一版译文质检发现以下问题，这次务必避免：\n" + "\n".join("- " + f for f in feedback)
@@ -333,10 +393,12 @@ def translate_page(job: Job, client, upright_path: Path, ocr_path: Path, index: 
         for g in groups:
             g["ids"] = [i for i in g.get("ids", []) if isinstance(i, int) and 0 <= i < len(lines)]
         taken = {i for g in groups for i in g["ids"]}
-        orphans = [i for i in range(len(lines)) if i not in taken
+        # Lines the model deliberately left alone (logos etc.) are neither orphans nor leftovers.
+        keep = sorted({i for i in result.get("keep") or [] if isinstance(i, int) and 0 <= i < len(lines)} - taken)
+        orphans = [i for i in range(len(lines)) if i not in taken and i not in keep
                    and not re.match(r"(page|p\.)\s*\d+\W*$", lines[i]["text"], re.I)]
         if orphans and groups:  # the model skipped lines: ask (text only) whether they are covered
-            extra = _ask_model(job, client, page, None, {
+            extra = _ask_model(job, client, page, image, {
                 "existing": [{"ids": g["ids"], "tr": g.get("tr") or g.get("zh") or ""} for g in groups],
                 "orphans": [items[i] for i in orphans]}, index, ORPHAN_PROMPT)
             for i in extra.get("covered") or []:
@@ -350,7 +412,8 @@ def translate_page(job: Job, client, upright_path: Path, ocr_path: Path, index: 
                 if ids and (g.get("tr") or g.get("zh")):
                     taken.update(ids)
                     groups.append({"ids": ids, "tr": g.get("tr") or g.get("zh")})
-        result = {"groups": groups}
+        result = {"groups": groups, "keep": keep}
+        _write_shared(shared, result)
     write_atomic(cache, json.dumps(result, ensure_ascii=False))
     return result
 
@@ -484,8 +547,8 @@ TERMS_PROMPT = """你是术语专家。用户发来一份{source}文档的 OCR �
 
 REVIEW_PROMPT = """你是排版与翻译质检员。第一张图是扫描文档的原页，第二张是把原文替换成{target}后的译文页（尽量保留原页面样式）。
 逐项检查译文页：
-1. 是否残留未翻译的{source}正文（页眉页脚、人名、签名、纯数字、代码除外）；
-2. 译文或覆盖色块是否遮挡了图形、签章、表格线或数字；
+1. 是否残留未翻译的{source}正文（页眉页脚、人名、签名、纯数字、代码除外；logo 及与标志排在一起构成标识的机构名保持原文是正确的）；
+2. 译文或覆盖色块是否遮挡了图形、签章、logo、表格线或数字（logo 被改写或被译文盖住算严重）；
 3. 文字是否重叠、溢出边界或明显错位、过小难以辨认；
 4. 数字、金额、日期、期限、条款编号是否与原页一致；
 5. 是否有明显漏译或意思相反的误译。
@@ -509,8 +572,12 @@ def extract_terms(job: Job, client, ocr: Path, tess: Path | None) -> int:
         text = "\n".join(picked)[:budget]
         prompt = TERMS_PROMPT.format(source=LANG_NAMES.get(job.lang_in, job.lang_in),
                                      target=LANG_NAMES.get(job.lang_out, job.lang_out))
-        answer = _chat(job, client, prompt, text, [], "glossary", "terms")
-        terms = [t for t in answer["terms"] if isinstance(t, dict) and t.get("src") and t.get("tgt")][:80]
+        shared = _shared_path(job, "terms", text, prompt, job.glossary)
+        terms = _read_shared(shared)
+        if terms is None:
+            answer = _chat(job, client, prompt, text, [], "glossary", "terms")
+            terms = [t for t in answer["terms"] if isinstance(t, dict) and t.get("src") and t.get("tgt")][:80]
+            _write_shared(shared, terms)
         write_atomic(cache, json.dumps(terms, ensure_ascii=False))
     if terms:
         job.glossary += "\n\n术语表（全文统一使用以下译法，大小写和单复数变化同理）：\n" + \
@@ -525,7 +592,7 @@ def rule_issues(lines: list[dict], result: dict, info: list[dict]) -> list[str]:
     from the image, so comparing OCR digits with the translation gives false alarms.
     """
     issues = []
-    taken = {i for g in result.get("groups", []) for i in g.get("ids", [])}
+    taken = {i for g in result.get("groups", []) for i in g.get("ids", [])} | set(result.get("keep") or [])
     left = [lines[i]["text"] for i in range(len(lines)) if i not in taken
             and len(re.findall(r"[^\W\d_]{3,}", lines[i]["text"])) >= 3
             and not re.search(r"www\.|https?:|@|\.(com|org|net|gov)\b", lines[i]["text"], re.I)]

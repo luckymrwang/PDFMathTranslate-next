@@ -24,7 +24,7 @@ Settings come from the environment or ~/.config/pdfmath-scan-worker.env (KEY=VAL
 Waiting uses long polling: the gateway holds each request up to LONG_POLL_SECONDS and
 answers as soon as an order is queued. During NIGHT_HOURS the worker additionally
 sleeps NIGHT_IDLE_SECONDS between polls (and tells the gateway, so that is not
-mistaken for being offline). Large orders (full_qa from the gateway) are delivered
+mistaken for being offline). Orders with full_qa (all of them, from the gateway) are delivered
 when fewer than HOLD_PROBLEM_PAGES pages still fail quality control, else held.
 """
 from __future__ import annotations
@@ -312,7 +312,8 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
             workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
             progress=lambda stage, pct: (beat.update(stage, pct), log.info("%s %s %.0f%%", order_id, stage, pct)),
-            should_stop=beat.lost.is_set, full_qa=bool(job_info.get("full_qa")))
+            should_stop=beat.lost.is_set, full_qa=bool(job_info.get("full_qa")),
+            shared_cache=root / SHARED_DIR)
         results = scan_pipeline.process(job, client)
         beat.update("上传结果", 99)
         report, hold = "", False
@@ -345,11 +346,18 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
     return 0
 
 
+# Translations shared across orders (see scan_pipeline.Job.shared_cache), kept in WORK_DIR.
+SHARED_DIR = "_shared"
+
+
 def prune(root: Path, days: int = 4):
-    """Drop work dirs of orders that were never finished here (results expire anyway)."""
+    """Drop work dirs of orders that were never finished here (results expire anyway)
+    and shared translations unused for a month."""
     cutoff = time.time() - days * 86400
     for path in root.iterdir():
-        if path.is_dir() and path.stat().st_mtime < cutoff:
+        if path.name == SHARED_DIR:
+            scan_pipeline.prune_shared(path)
+        elif path.is_dir() and path.stat().st_mtime < cutoff:
             scan_pipeline.cleanup(path)
 
 
@@ -428,7 +436,8 @@ def main():
     proc.add_argument("--output", default="both", choices=["dual", "mono", "both"])
     proc.add_argument("--lang-in", default="en")
     proc.add_argument("--lang-out", default="zh")
-    proc.add_argument("--full-qa", action="store_true", help="glossary + quality control, as for large orders")
+    proc.add_argument("--full-qa", action="store_true", help="glossary + quality control")
+    proc.add_argument("--shared-cache", help="reuse/store translations across runs in this directory")
     args = ap.parse_args()
 
     if args.cmd == "run":
@@ -448,7 +457,8 @@ def main():
             output=args.output, model=vision_model(""),
             workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
-            progress=lambda stage, pct: print(f"[{pct:5.1f}%] {stage}", flush=True), full_qa=args.full_qa)
+            progress=lambda stage, pct: print(f"[{pct:5.1f}%] {stage}", flush=True), full_qa=args.full_qa,
+            shared_cache=Path(args.shared_cache).resolve() if args.shared_cache else None)
         for kind, path in scan_pipeline.process(job, model_client()).items():
             dest = out / f"{Path(args.input).stem}-{kind}.pdf"
             os.replace(path, dest)
