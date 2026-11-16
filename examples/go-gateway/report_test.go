@@ -51,14 +51,8 @@ func TestPaymentAlertSentOnceWithDailyTotal(t *testing.T) {
 	if line := s.todaySales(time.Now()); !strings.Contains(line, "付费 1 单 ¥2.10") {
 		t.Fatal("today's total missing the sale:", line)
 	}
-	if summary := orderSummary(paid, "USER2345"); !strings.Contains(summary, "GPT 8 折，省 ¥0.90") {
+	if summary := orderSummary(paid); !strings.Contains(summary, "GPT 8 折，省 ¥0.90") {
 		t.Fatal("alert should mention the scan discount:", summary)
-	}
-	if summary := orderSummary(paid, "USER2345"); !strings.Contains(summary, "用户：USER2345") {
-		t.Fatal("alert should identify the customer:", summary)
-	}
-	if summary := orderSummary(paid, ""); strings.Contains(summary, "用户：") {
-		t.Fatal("alert should omit an unknown customer:", summary)
 	}
 }
 
@@ -193,22 +187,5 @@ func TestClosedOrdersStopBeingPolledWeChat(t *testing.T) {
 	}
 	if _, polled := onceLogged.Load("closed:Tfresh"); !polled {
 		t.Fatal("the recent closed order should have been polled (and its failure logged once)")
-	}
-}
-
-func TestCustomerCodeIdentifiesTheBuyer(t *testing.T) {
-	s := testPayServer(t)
-	if _, err := s.pay.referrals.db.Exec(
-		"INSERT INTO referral_users(openid,code,credit) VALUES(?,?,0)", "openid-1234567890", "ABCD2345"); err != nil {
-		t.Fatal(err)
-	}
-	if code := s.customerCode("openid-1234567890"); code != "ABCD2345" {
-		t.Fatalf("customer code = %q, want the invite code", code)
-	}
-	if code := s.customerCode("openid-0987654321"); code != "" {
-		t.Fatalf("a customer without an invite code should be left out, got %q", code)
-	}
-	if code := s.customerCode(""); code != "" {
-		t.Fatalf("no owner means no customer line, got %q", code)
 	}
 }

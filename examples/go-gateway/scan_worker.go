@@ -135,7 +135,7 @@ func (s *Server) queueScanOrder(order PayOrder) (string, error) {
 	}
 	s.tasks.set(taskID, order.OpenID)
 	s.scanSig.wake()
-	s.notify("扫描件订单已交给 Mac 处理", s.orderSummary(order)+qaNote(order))
+	s.notify("扫描件订单已交给 Mac 处理", orderSummary(order)+qaNote(order))
 	return taskID, nil
 }
 
@@ -433,7 +433,7 @@ func (s *Server) scanResult(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	current, _ := s.pay.store.get(id)
 	if hold {
-		s.notify("大额扫描件质检未通过，已暂停交付，等待你的复核", s.orderSummary(current)+"\n"+report+
+		s.notify("大额扫描件质检未通过，已暂停交付，等待你的复核", orderSummary(current)+"\n"+report+
 			"\n检查后在 Mac 终端执行（二选一）：\n"+macCommand("release "+id)+"  ← 直接交付\n"+
 			macCommand("release "+id+" --dual 修正后.pdf")+"  ← 换上修正后的文件再交付")
 		writeJSON(w, http.StatusOK, map[string]string{"delivery": "held"})
@@ -445,7 +445,7 @@ func (s *Server) scanResult(w http.ResponseWriter, r *http.Request, id string) {
 		title = "大额扫描件已交付（质检通过）"
 	}
 	delivered, _ := s.pay.store.get(id)
-	s.notify(title, s.orderSummary(delivered)+optionalLine(report))
+	s.notify(title, orderSummary(delivered)+optionalLine(report))
 	writeJSON(w, http.StatusOK, map[string]string{"delivery": "archived"})
 }
 
@@ -499,7 +499,7 @@ func (s *Server) scanRelease(w http.ResponseWriter, r *http.Request, id string) 
 	if len(saved) > 0 {
 		note = "使用替换后的文件"
 	}
-	s.notify("复核后已交付", s.orderSummary(delivered)+"\n"+note)
+	s.notify("复核后已交付", orderSummary(delivered)+"\n"+note)
 	writeJSON(w, http.StatusOK, map[string]string{"delivery": "archived"})
 }
 
@@ -581,15 +581,15 @@ func (s *Server) scanFail(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if in.Interrupted {
 		log.Printf("scan worker interrupted on order %s: %s", id, in.Reason)
-		s.notify("Mac 关机或重启，扫描件订单已退回队列", s.orderSummary(order)+
+		s.notify("Mac 关机或重启，扫描件订单已退回队列", orderSummary(order)+
 			"\n不计失败次数，Mac 开机后会接着处理（已完成的页面不会重做）\n"+in.Reason)
 	} else if in.Pause {
-		s.notify("Mac 暂停处理扫描件", s.orderSummary(order)+"\n订单已退回队列（不计失败次数）\n原因："+in.Reason)
+		s.notify("Mac 暂停处理扫描件", orderSummary(order)+"\n订单已退回队列（不计失败次数）\n原因："+in.Reason)
 	} else if failed {
-		s.notify("扫描件订单处理失败，请在 Mac 上处理", s.orderSummary(order)+"\n原因："+in.Reason+
+		s.notify("扫描件订单处理失败，请在 Mac 上处理", orderSummary(order)+"\n原因："+in.Reason+
 			"\n👉 处理：在 Mac 终端执行 "+macCommand("adopt "+id))
 	} else {
-		s.notify("扫描件订单处理出错，已重新排队", s.orderSummary(order)+
+		s.notify("扫描件订单处理出错，已重新排队", orderSummary(order)+
 			fmt.Sprintf("\n第 %d 次尝试失败：%s", order.Attempts, in.Reason))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"delivery": order.Delivery})
@@ -678,7 +678,7 @@ func (s *Server) reconcileScanQueue() {
 				s.scanReminded.Store(o.ID, now.Unix())
 				hours := (now.Unix() - o.ScanHeldAt) / 3600
 				s.notify(fmt.Sprintf("提醒：扫描件订单已暂停交付 %d 小时，等待你的复核", hours),
-					s.orderSummary(o)+"\n放行（处理完这单就结束）：在 Mac 终端执行 "+macCommand("release "+o.ID))
+					orderSummary(o)+"\n放行（处理完这单就结束）：在 Mac 终端执行 "+macCommand("release "+o.ID))
 			}
 			continue
 		}
@@ -715,7 +715,7 @@ func (s *Server) reconcileScanQueue() {
 		}
 		fresh, _ := s.pay.store.get(o.ID)
 		if failed {
-			s.notify("扫描件订单多次处理中断，请在 Mac 上处理", s.orderSummary(fresh)+
+			s.notify("扫描件订单多次处理中断，请在 Mac 上处理", orderSummary(fresh)+
 				fmt.Sprintf("\n已中断 %d 次（Mac 关机或处理程序崩溃）", fresh.ScanTimeouts)+
 				"\n👉 处理：在 Mac 终端执行 "+macCommand("adopt "+fresh.ID))
 		} else {

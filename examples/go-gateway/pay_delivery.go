@@ -178,7 +178,7 @@ func (s *Server) nextPaidAttempt(id string) error {
 		case order.Scanned:
 			title = "扫描件翻译失败，请在 Mac 上立即处理"
 		}
-		s.notify(title, s.orderSummary(order)+fmt.Sprintf("\n已自动重试 %d 次仍失败", maxPaidAttempts)+next)
+		s.notify(title, orderSummary(order)+fmt.Sprintf("\n已自动重试 %d 次仍失败", maxPaidAttempts)+next)
 		return errPaidFailed
 	}
 	return nil
@@ -199,9 +199,9 @@ func (s *Server) failPaidOrder(id, reason string) error {
 	log.Printf("paid translation cannot succeed (%s); settlement recorded (order=%s)", reason, id)
 	order, _ := s.pay.store.get(id)
 	if pointsOnly(order) {
-		s.notify("积分订单无法翻译（无需处理）", s.orderSummary(order)+"\n原因："+reason+"\n积分会自动退回")
+		s.notify("积分订单无法翻译（无需处理）", orderSummary(order)+"\n原因："+reason+"\n积分会自动退回")
 	} else {
-		s.notify("付费订单无法翻译", s.orderSummary(order)+"\n原因："+reason)
+		s.notify("付费订单无法翻译", orderSummary(order)+"\n原因："+reason)
 	}
 	return errPaidFailed
 }
