@@ -201,6 +201,16 @@ async function run() {
   const cancelledCreations = created.length
   await home.confirmTranslation()
   assert.equal(created.length, cancelledCreations + 1, 'Cancelled payment retries create a fresh order')
+  // Home recent list: orders and saved results share one newest-first list.
+  home.setData({ recentLimit: 2,
+    recentOrders: [{ id: 'old-order', created_at: 1000 }],
+    recentShort: [{ id: 'new-record', createdAt: 5000000 }, { id: 'older-record', completedAt: 2000000 }] })
+  home.refreshRecentList()
+  assert.equal(home.data.recentList.map(item => item.id).join(), 'new-record,older-record', 'Newer saved results come before an older order')
+  home.setData({ recentOrders: [{ id: 'live-order', created_at: 9000 }] })
+  home.refreshRecentList()
+  assert.equal(home.data.recentList[0].id, 'live-order', 'A newer order comes first')
+  assert.equal(home.data.recentList[0].srcIndex, 0)
   // Scanned PDF: no modal; the payment sheet flags only engines that cannot read images.
   home.setData({ scanEngines: ['GPT-5.6', 'GPT-6'] })
   const scanNote = engine => { const v = home.scanValues(engine); return v.scanWarn + ':' + v.scanTarget }
