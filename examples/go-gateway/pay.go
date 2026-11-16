@@ -503,7 +503,7 @@ func (s *Server) grantOrder(id string, verified queriedOrder) error {
 		// Both the payment callback and reconciliation land here; only the first
 		// transition to paid reports the sale.
 		if order, ok := s.pay.store.get(id); ok {
-			s.notify(fmt.Sprintf("新付费订单 ¥%.2f", float64(order.Total)/100), orderSummary(order)+"\n"+s.todaySales(time.Now()))
+			s.notify(fmt.Sprintf("新付费订单 ¥%.2f", float64(order.Total)/100), s.orderSummary(order)+"\n"+s.todaySales(time.Now()))
 		}
 	}
 	return err
@@ -611,7 +611,7 @@ func (s *Server) startPaidOrderLocked(ctx context.Context, id string) (string, e
 			if pointsOnly(order) {
 				next = "积分订单失败后会自动退回积分，并提示用户换 GPT 引擎重新下单，无需处理。"
 			}
-			s.notify("扫描件用 "+order.Engine+" 下单，自动翻译大概率失败（先不用处理）", orderSummary(order)+
+			s.notify("扫描件用 "+order.Engine+" 下单，自动翻译大概率失败（先不用处理）", s.orderSummary(order)+
 				"\n"+order.Engine+" 读不了图片里的文字；"+next)
 		}
 		taskID, err := s.submitPaidOrder(ctx, order)

@@ -101,13 +101,17 @@ func truncateUTF8(text string, limit int) string {
 	return text[:cut] + more
 }
 
-// orderSummary describes an order for an operator alert.
-func orderSummary(o PayOrder) string {
-	lines := []string{
-		"订单：" + o.ID,
-		"文件：" + o.Name,
-		fmt.Sprintf("页数：%d　引擎：%s　%s→%s", o.PageCount(), o.Engine, o.LangIn, o.LangOut),
+// orderSummary describes an order for an operator alert. userCode identifies the
+// customer: the invite code they see in the mini-program, so a message from them
+// can be matched to the order. Empty when the customer is not known.
+func orderSummary(o PayOrder, userCode string) string {
+	lines := []string{"订单：" + o.ID}
+	if userCode != "" {
+		lines = append(lines, "用户："+userCode)
 	}
+	lines = append(lines,
+		"文件："+o.Name,
+		fmt.Sprintf("页数：%d　引擎：%s　%s→%s", o.PageCount(), o.Engine, o.LangIn, o.LangOut))
 	switch {
 	case o.Total > 0 && o.CreditPoints > 0:
 		lines = append(lines, fmt.Sprintf("金额：¥%.2f + %d 积分", float64(o.Total)/100, o.CreditPoints))
@@ -123,4 +127,29 @@ func orderSummary(o PayOrder) string {
 		lines = append(lines, fmt.Sprintf("优惠：GPT %d 折，省 ¥%.2f", (100-scanDiscountPercent)/10, float64(o.ScanDiscount)/100))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Server) orderSummary(o PayOrder) string {
+	return orderSummary(o, s.customerCode(o.OpenID))
+}
+
+// customerCode is the ID an operator can quote back to the customer. Every
+// customer that logs in has an invite code; without a stored account the OpenID
+// is masked instead of being printed whole.
+func (s *Server) customerCode(openid string) string {
+	if openid == "" || s.pay == nil || s.pay.referrals == nil || s.pay.referrals.db == nil {
+		return ""
+	}
+	var code string
+	if err := s.pay.referrals.db.QueryRow("SELECT code FROM referral_users WHERE openid=?", openid).Scan(&code); err != nil {
+		return maskOpenID(openid)
+	}
+	return code
+}
+
+func maskOpenID(openid string) string {
+	if len(openid) <= 8 {
+		return openid
+	}
+	return openid[:4] + "…" + openid[len(openid)-4:]
 }

@@ -332,8 +332,8 @@ func TestScannedOrdersAreBoughtAsTheScanProduct(t *testing.T) {
 		o.ScanFreePages != 0 || o.ScanDiscount != 100 {
 		t.Fatalf("a scan should be bought as the 8折 product: %+v", o)
 	}
-	if !strings.Contains(orderSummary(o), "省 ¥1.00") {
-		t.Fatal("alert should show the saving:", orderSummary(o))
+	if !strings.Contains(orderSummary(o, ""), "省 ¥1.00") {
+		t.Fatal("alert should show the saving:", orderSummary(o, ""))
 	}
 	// 300 pages would save ¥30 at 8折; past the ¥20 cap it falls back to free pages.
 	big := buy("GPT-5.6", 300, "")
