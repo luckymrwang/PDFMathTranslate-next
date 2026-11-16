@@ -28,7 +28,7 @@ func TestPaymentAlertSentOnceWithDailyTotal(t *testing.T) {
 	alerts := newAlertSink(t)
 	s := testPayServer(t)
 	order := PayOrder{ID: "Tpaid", OpenID: "owner", Engine: "GPT-5.6", Pages: 10, Quantity: 7, Total: 210,
-		ScanFreePages: 3, Scanned: true, State: "pending", CreatedAt: time.Now().Unix()}
+		ScanFreePages: 3, ScanDiscount: 90, Scanned: true, State: "pending", CreatedAt: time.Now().Unix()}
 	if err := s.pay.store.add(order); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestPaymentAlertSentOnceWithDailyTotal(t *testing.T) {
 	if line := s.todaySales(time.Now()); !strings.Contains(line, "付费 1 单 ¥2.10") {
 		t.Fatal("today's total missing the sale:", line)
 	}
-	if summary := orderSummary(paid); !strings.Contains(summary, "扫描件 8 折") {
+	if summary := orderSummary(paid); !strings.Contains(summary, "扫描件 8 折，省 ¥0.90") {
 		t.Fatal("alert should mention the scan discount:", summary)
 	}
 }

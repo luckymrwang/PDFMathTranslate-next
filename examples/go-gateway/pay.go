@@ -41,7 +41,7 @@ func orderView(order PayOrder) map[string]any {
 		"pages":          order.PageCount(),
 		"document_pages": order.DocumentPages, "trial_credit_pages": order.TrialCredit, "upgrade_from": order.UpgradeFrom,
 		"credit_pages": order.CreditPages, "points_covered_pages": order.CreditPages, "points_spent": order.CreditPoints,
-		"scan_free_pages": order.ScanFreePages, "scanned": order.Scanned,
+		"scan_free_pages": order.ScanFreePages, "scan_discount_fen": order.ScanDiscount, "scanned": order.Scanned,
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial,
@@ -99,6 +99,10 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 	for engine, p := range s.pay.cfg.EngineProducts {
 		enginePrices[engine] = p.Price
 	}
+	scanPrices := map[string]int{}
+	for engine, p := range s.pay.cfg.ScanProducts {
+		scanPrices[engine] = p.Price
+	}
 	openid, _ := r.Context().Value(ctxKeyOpenID).(string)
 	wallet, err := s.pay.referrals.wallet(openid, time.Now())
 	if err != nil {
@@ -107,6 +111,7 @@ func (s *Server) handlePayConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	config := map[string]any{"enabled": s.payEnabled(), "trial_enabled": false, "standard_price_fen": s.pay.cfg.StandardPrice,
 		"enhanced_price_fen": s.pay.cfg.EnhancedPrice, "engine_prices_fen": enginePrices,
+		"scan_prices_fen": scanPrices, "scan_discount_percent": scanDiscountPercent, "scan_discount_cap_fen": scanDiscountCapFen,
 		"ios_unit_fen": s.pay.cfg.IOSUnit, "ios_min_fen": iosMinFen,
 		"trial_available": false, "trial_pages": trialPages, "trial_engine": trialEngine,
 		"credit_pages": s.pay.referrals.credit(openid) / pointsPerPage}
@@ -809,14 +814,14 @@ func (s *Server) resumePaid(id string) {
 var errCashDisabled = errors.New("付费翻译暂未开放，积分不足以抵扣全文")
 var errPaymentSession = errors.New("请重新登录后支付")
 
-// scanDiscountFor sizes a scanned order's discount at the engine's per-page price.
-// A text PDF gets nothing; the client's preview uses the same rule.
+// scanDiscountFor is the free pages a scanned order gets when it is not bought as a
+// discounted scan product. The client's preview uses the same rule.
 func (s *Server) scanDiscountFor(engine string, pages int, scanned bool) int {
 	if !scanned {
 		return 0
 	}
-	_, unit := s.pay.cfg.productFor(engine)
-	return scanDiscountPages(pages, unit)
+	_, _, free := s.pay.cfg.scanDeal(engine, pages)
+	return free
 }
 
 func (s *Server) pricePurchase(o *PayOrder, remaining int, platform, session string) error {
@@ -830,7 +835,18 @@ func (s *Server) pricePurchase(o *PayOrder, remaining int, platform, session str
 	if session == "" {
 		return errPaymentSession
 	}
-	o.ProductID, o.UnitPrice, o.Quantity, o.Total = s.pay.cfg.orderAmounts(o.Engine, remaining, platform == "ios")
+	ios := platform == "ios"
+	o.ProductID, o.UnitPrice, o.Quantity, o.Total = s.pay.cfg.orderAmounts(o.Engine, remaining, ios)
+	if o.Scanned {
+		_, full := s.pay.cfg.productFor(o.Engine)
+		// Free pages were already left out of remaining; a scan product is bought instead.
+		if product, unit, free := s.pay.cfg.scanDeal(o.Engine, remaining); product != "" && free == 0 && o.ScanFreePages == 0 {
+			o.ProductID, o.UnitPrice, o.Quantity, o.Total = s.pay.cfg.amounts(product, unit, remaining, ios)
+			o.ScanDiscount = remaining * (full - unit)
+		} else {
+			o.ScanDiscount = o.ScanFreePages * full
+		}
+	}
 	if o.Total > 10000000 {
 		return errOrderAmountLimit
 	}

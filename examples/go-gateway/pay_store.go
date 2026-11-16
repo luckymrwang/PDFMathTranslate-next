@@ -21,6 +21,9 @@ type PayConfig struct {
 	StandardPrice, EnhancedPrice              int
 	// Engines priced separately; others use the standard or enhanced product.
 	EngineProducts map[string]enginePrice
+	// ScanProducts are the discounted per-page products a scanned order is bought as
+	// (see scanDeal); an engine without one falls back to free pages.
+	ScanProducts map[string]enginePrice
 	// iOS (Apple) rejects orders under iosMinFen. With an iOS unit product configured,
 	// iOS orders are rounded up to whole units of IOSUnit fen and bought as that product.
 	IOSProduct string
@@ -34,6 +37,10 @@ type enginePrice struct {
 	Product string
 	Price   int
 }
+
+// scanProductEnv maps a scan engine to its VIRTUALPAY_SCAN_<PREFIX>_PRODUCT_ID / _PRICE_FEN
+// pair: the 8折 product scanned PDFs are bought as.
+var scanProductEnv = map[string]string{"GPT-5.6": "ENHANCED", "GPT-6": "GPT"}
 
 // engineProductEnv maps an engine to its optional VIRTUALPAY_<PREFIX>_PRODUCT_ID / _PRICE_FEN pair.
 var engineProductEnv = map[string]string{"Google": "GOOGLE", "GPT-6": "GPT", "DeepSeek-V4.1-Flash": "DEEPSEEK"}
@@ -51,7 +58,7 @@ func loadPayConfig() (*PayConfig, error) {
 		Dir:             getenv("VIRTUALPAY_DATA_DIR", "./data/virtualpay"),
 		StandardProduct: os.Getenv("VIRTUALPAY_STANDARD_PRODUCT_ID"),
 		EnhancedProduct: os.Getenv("VIRTUALPAY_ENHANCED_PRODUCT_ID"),
-		EngineProducts:  map[string]enginePrice{}}
+		EngineProducts:  map[string]enginePrice{}, ScanProducts: map[string]enginePrice{}}
 	c.StandardPrice, _ = strconv.Atoi(os.Getenv("VIRTUALPAY_STANDARD_PRICE_FEN"))
 	c.EnhancedPrice, _ = strconv.Atoi(os.Getenv("VIRTUALPAY_ENHANCED_PRICE_FEN"))
 	// Engine prices are parsed with cash payment disabled too, so quotes (and the
@@ -73,6 +80,18 @@ func loadPayConfig() (*PayConfig, error) {
 			return nil, fmt.Errorf("VIRTUALPAY_%s_PRODUCT_ID is required when virtual payment is enabled", prefix)
 		}
 		c.EngineProducts[engine] = enginePrice{product, price}
+	}
+	for engine, prefix := range scanProductEnv {
+		product := os.Getenv("VIRTUALPAY_SCAN_" + prefix + "_PRODUCT_ID")
+		rawPrice := os.Getenv("VIRTUALPAY_SCAN_" + prefix + "_PRICE_FEN")
+		if product == "" && rawPrice == "" {
+			continue
+		}
+		price, err := strconv.Atoi(rawPrice)
+		if product == "" || err != nil || price <= 0 || price > 100000 {
+			return nil, fmt.Errorf("VIRTUALPAY_SCAN_%s_PRODUCT_ID and VIRTUALPAY_SCAN_%s_PRICE_FEN must be set together with a valid fen price", prefix, prefix)
+		}
+		c.ScanProducts[engine] = enginePrice{product, price}
 	}
 	if !c.Enabled {
 		return c, nil
@@ -111,10 +130,31 @@ func (c *PayConfig) productFor(engine string) (string, int) {
 	return c.EnhancedProduct, c.EnhancedPrice
 }
 
+// scanDeal prices a scanned order of pages on engine. With a discounted scan product
+// whose saving stays within scanDiscountCapFen, the order is bought as that product
+// (free == 0). Otherwise the discount is taken as whole free pages at the normal
+// price, which also applies the cap. Engines that cannot read scans get nothing.
+func (c *PayConfig) scanDeal(engine string, pages int) (product string, unit, free int) {
+	if !isScanEngine(engine) || pages <= 0 {
+		return "", 0, 0
+	}
+	_, full := c.productFor(engine)
+	if p, ok := c.ScanProducts[engine]; ok && p.Price < full && pages*(full-p.Price) <= scanDiscountCapFen {
+		return p.Product, p.Price, 0
+	}
+	return "", 0, scanDiscountPages(pages, full)
+}
+
 // orderAmounts returns the product, per-unit price, units bought and total (fen)
 // for an order. Without an iOS unit product the amount is simply pages x price.
 func (c *PayConfig) orderAmounts(engine string, pages int, ios bool) (product string, unit, quantity, total int) {
 	product, unit = c.productFor(engine)
+	return c.amounts(product, unit, pages, ios)
+}
+
+// amounts converts pages at a per-page price into what WeChat is asked to charge.
+// iOS orders are rounded up to whole units of the iOS product.
+func (c *PayConfig) amounts(product string, unit, pages int, ios bool) (string, int, int, int) {
 	if !ios || c.IOSProduct == "" {
 		return product, unit, pages, pages * unit
 	}
@@ -159,9 +199,12 @@ type PayOrder struct {
 	Scanned bool
 	// PaidAt is when the platform confirmed the cash payment (0 before it existed).
 	PaidAt int64
-	// ScanFreePages are pages of a scanned PDF left out of Quantity: a user's first
-	// paid scanned order on an image-capable engine gets its first pages free.
+	// ScanFreePages are pages of a scanned PDF left out of Quantity: the scan discount
+	// when no discounted scan product applies (see scanDeal).
 	ScanFreePages int
+	// ScanDiscount is what the scan discount saved (fen, at the normal list price),
+	// whether as free pages or as a cheaper scan product.
+	ScanDiscount int
 	// ScanWorker routes the order to the Mac scan worker instead of the Python API.
 	// ScanLease is when the worker's claim expires (0 while waiting); ScanStage and
 	// ScanProgress mirror the worker's progress for the client.

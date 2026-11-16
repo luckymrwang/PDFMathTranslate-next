@@ -280,8 +280,9 @@ func TestScannedOrdersGetTheScanDiscount(t *testing.T) {
 		t.Fatal("every scanned order is discounted, not only the first", again.ScanFreePages)
 	}
 	for name, order := range map[string]PayOrder{
-		"text PDF":      buy("text", "GPT-5.6", 10, false),
-		"one-page scan": buy("tiny", "GPT-5.6", 1, true),
+		"text PDF":         buy("text", "GPT-5.6", 10, false),
+		"one-page scan":    buy("tiny", "GPT-5.6", 1, true),
+		"text-only engine": buy("bing", "Bing", 10, true),
 	} {
 		if order.ScanFreePages != 0 || order.Quantity != order.Pages {
 			t.Fatal(name+" must not be discounted", order.ScanFreePages, order.Quantity)
@@ -304,5 +305,48 @@ func TestPointsOrderFailureTellsUserWhatHappened(t *testing.T) {
 	}
 	if !strings.Contains(scanReorderNote(scan), "GPT-5.6") || scanReorderNote(text) != "" {
 		t.Fatal("operator note should only suggest reordering scans")
+	}
+}
+
+func TestScannedOrdersAreBoughtAsTheScanProduct(t *testing.T) {
+	s := testPayServer(t)
+	s.pay.cfg.ScanProducts = map[string]enginePrice{"GPT-5.6": {"scan-enhanced", 40}} // 8折 of 50
+	buy := func(engine string, pages int, platform string) PayOrder {
+		t.Helper()
+		id, _ := newTradeNo()
+		order := PayOrder{ID: id, OpenID: "owner", Pages: pages, Engine: engine, State: "pending",
+			Scanned: true, CreatedAt: time.Now().Unix()}
+		free := s.scanDiscountFor(engine, pages, true)
+		if err := s.pay.store.addPurchase(&order, pages, free, func(o *PayOrder, remaining int) error {
+			return s.pricePurchase(o, remaining, platform, "session")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return order
+	}
+
+	o := buy("GPT-5.6", 10, "")
+	if o.ProductID != "scan-enhanced" || o.UnitPrice != 40 || o.Quantity != 10 || o.Total != 400 ||
+		o.ScanFreePages != 0 || o.ScanDiscount != 100 {
+		t.Fatalf("a scan should be bought as the 8折 product: %+v", o)
+	}
+	if !strings.Contains(orderSummary(o), "省 ¥1.00") {
+		t.Fatal("alert should show the saving:", orderSummary(o))
+	}
+	// 300 pages would save ¥30 at 8折; past the ¥20 cap it falls back to free pages.
+	big := buy("GPT-5.6", 300, "")
+	if big.ProductID != "enhanced" || big.ScanFreePages != 40 || big.Total != 260*50 || big.ScanDiscount != 2000 {
+		t.Fatalf("a large scan should be capped at ¥20: %+v", big)
+	}
+	// GPT-6 has no scan product configured here: free pages instead.
+	if gpt6 := buy("GPT-6", 10, ""); gpt6.ScanFreePages != 2 || gpt6.ScanDiscount != 100 {
+		t.Fatalf("an engine without a scan product falls back to free pages: %+v", gpt6)
+	}
+	s.pay.cfg.IOSProduct, s.pay.cfg.IOSUnit = "ios", 50
+	if ios := buy("GPT-5.6", 10, "ios"); ios.ProductID != "ios" || ios.Total != 400 || ios.ScanDiscount != 100 {
+		t.Fatalf("iOS rounds the scan price into its own units: %+v", ios)
+	}
+	if bing := buy("Bing", 10, ""); bing.ScanDiscount != 0 || bing.ScanFreePages != 0 {
+		t.Fatalf("a text-only engine is not discounted: %+v", bing)
 	}
 }
