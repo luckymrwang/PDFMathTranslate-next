@@ -40,10 +40,13 @@ import (
 //	                                       cannot take orders (e.g. model proxy not started)
 //	POST /worker/scan/{id}/adopt           hand any undelivered paid order to the worker
 //
-// Every order gets full quality control on the Mac (glossary, checks, page review,
-// one redo); the Mac holds an order for operator review when too many pages still fail.
+// Orders worth more than scanQAThresholdFen at scanQAPageFen per page get full
+// quality control on the Mac (glossary, checks, page review); the Mac holds them
+// for operator review when too many pages still fail.
 
 const (
+	scanQAPageFen      = 40   // value per page for the quality-control threshold
+	scanQAThresholdFen = 3000 // orders worth more than this get full quality control
 	maxScanWait        = 5 * time.Minute
 	maxScanIdle        = 2 * time.Hour
 	scanHeldReminder   = 6 * time.Hour
@@ -79,6 +82,9 @@ func (s *scanSignal) wake() {
 		s.ch = nil
 	}
 }
+
+// scanFullQA reports whether an order gets full quality control on the Mac.
+func scanFullQA(o PayOrder) bool { return o.PageCount()*scanQAPageFen > scanQAThresholdFen }
 
 func scanWorkerToken() string { return os.Getenv("SCAN_WORKER_TOKEN") }
 
@@ -129,8 +135,16 @@ func (s *Server) queueScanOrder(order PayOrder) (string, error) {
 	}
 	s.tasks.set(taskID, order.OpenID)
 	s.scanSig.wake()
-	s.notify("扫描件订单已交给 Mac 处理", orderSummary(order))
+	s.notify("扫描件订单已交给 Mac 处理", orderSummary(order)+qaNote(order))
 	return taskID, nil
+}
+
+// qaNote tells the operator whether the order gets full quality control.
+func qaNote(o PayOrder) string {
+	if scanFullQA(o) {
+		return fmt.Sprintf("\n大额订单（按 ¥%.2f 计）：统一术语 + 逐页质检", float64(o.PageCount()*scanQAPageFen)/100)
+	}
+	return ""
 }
 
 func (s *Server) writeScanStatus(w http.ResponseWriter, order PayOrder, taskID string) {
@@ -211,7 +225,7 @@ func (s *Server) claimScanOrder(w http.ResponseWriter, r *http.Request) {
 				"name": claimed.Name, "pages": claimed.PageCount(), "engine": claimed.Engine,
 				"lang_in": claimed.LangIn, "lang_out": claimed.LangOut, "output": outputOrDefault(claimed.Output),
 				"attempt": claimed.Attempts + 1, "lease_seconds": int(scanLeaseTTL.Seconds()),
-				"full_qa": true})
+				"full_qa": scanFullQA(claimed)})
 			return
 		}
 		select {

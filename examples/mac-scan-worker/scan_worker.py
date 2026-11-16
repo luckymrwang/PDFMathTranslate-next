@@ -24,7 +24,7 @@ Settings come from the environment or ~/.config/pdfmath-scan-worker.env (KEY=VAL
 Waiting uses long polling: the gateway holds each request up to LONG_POLL_SECONDS and
 answers as soon as an order is queued. During NIGHT_HOURS the worker additionally
 sleeps NIGHT_IDLE_SECONDS between polls (and tells the gateway, so that is not
-mistaken for being offline). Orders with full_qa (all of them, from the gateway) are delivered
+mistaken for being offline). Large orders (full_qa from the gateway) are delivered
 when fewer than HOLD_PROBLEM_PAGES pages still fail quality control, else held.
 """
 from __future__ import annotations

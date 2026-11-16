@@ -88,7 +88,7 @@ class Job:
     glossary: str = ""
     progress: Callable[[str, float], None] = lambda stage, pct: None
     should_stop: Callable[[], bool] = lambda: False
-    full_qa: bool = False  # glossary + rule checks + vision review + one redo
+    full_qa: bool = False  # glossary + rule checks + vision review + one redo (large orders)
     # Page translations and glossaries shared across orders, keyed by the OCR content,
     # model, languages and prompts: the same file ordered again gets the same result.
     shared_cache: Path | None = None

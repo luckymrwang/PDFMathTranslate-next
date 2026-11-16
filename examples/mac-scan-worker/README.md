@@ -23,9 +23,9 @@ Mac 用**长轮询**等订单：每次请求最多挂起 5 分钟，订单一进
 4. **原位替换**：用取样的背景色盖住原文，在原位置写入译文，保留签章、表格线和数字。
    生成双语对照版（左原文、右译文）和/或纯译文版，按订单的输出格式回传。
 
-### 完整质检
+### 大额订单的完整质检
 
-每个扫描件订单都做：
+按 **页数 × ¥0.4 > ¥30**（76 页及以上）判定为大额订单，额外做：
 
 1. **统一术语**：先通读全文抽取最多 80 个术语，整本使用同一译法。
 2. **规则检查**：残留原文、译文被压缩或字号过小。
@@ -92,14 +92,14 @@ python examples/mac-scan-worker/scan_worker.py adopt T0123...
 python examples/mac-scan-worker/scan_worker.py release T0123...
 python examples/mac-scan-worker/scan_worker.py release T0123... --dual 修正后.pdf
 
-# 本地处理一个文件（人工兜底、试效果；--full-qa 走与线上订单相同的完整质检，
+# 本地处理一个文件（人工兜底、试效果；--full-qa 走大额订单的完整质检，
 # --shared-cache 目录可在多次运行间复用译文）
 python examples/mac-scan-worker/scan_worker.py process input.pdf out/ --output both --full-qa
 ```
 
 ## 已知限制
 
-- 需要固定译法时可用 `GLOSSARY_FILE` 指定术语表（CSV：原文,译文）。
+- 小额订单不做术语统一和质检，同一术语在不同页可能译法不同；可用 `GLOSSARY_FILE` 指定固定术语表（CSV：原文,译文）。
 - 质检由模型完成，可能漏掉问题，也可能误报；只重做一轮。
-- 质检让每页的模型调用量约增加一倍，处理时间也相应变长。
+- 大额订单的模型调用量约为小额的两倍。
 - 处理速度取决于模型并发和额度；数百页的文档可能需要几十分钟。
