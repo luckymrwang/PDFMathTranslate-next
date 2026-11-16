@@ -355,6 +355,8 @@ func (s *Server) handleTranslateResult(w http.ResponseWriter, r *http.Request, t
 type upstreamStatus struct {
 	State     string `json:"state"`
 	ErrorType string `json:"error_type"`
+	// Untranslated counts paragraphs the translator failed on (kept in the source language).
+	Untranslated int `json:"untranslated_paragraphs"`
 }
 
 func (s *Server) fetchStatus(ctx context.Context, taskID string) (*upstreamStatus, error) {
