@@ -15,7 +15,7 @@ the gateway answer 409, which stops the work here.
 
 Settings come from the environment or ~/.config/pdfmath-scan-worker.env (KEY=VALUE):
   GATEWAY_URL, SCAN_WORKER_TOKEN                      gateway and its shared token
-  OPENAI_BASE_URL, OPENAI_API_KEY, VISION_MODEL       local model proxy (image input)
+  OPENAI_BASE_URL, OPENAI_API_KEY, VISION_MODEL       model endpoint (image input)
   OCRMYPDF                                            ocrmypdf with the appleocr plugin
   WORK_DIR, TRANSLATE_WORKERS, GLOSSARY_FILE         optional
   LONG_POLL_SECONDS (300), NIGHT_HOURS (1-7), NIGHT_IDLE_SECONDS (1500), HOLD_PROBLEM_PAGES (5)
@@ -160,8 +160,21 @@ def pause_seconds(message: str, default: int = 900) -> int:
 
 def model_client():
     from openai import OpenAI
-    return OpenAI(base_url=setting("OPENAI_BASE_URL", "http://127.0.0.1:3425/v1"),
+    return OpenAI(base_url=setting("OPENAI_BASE_URL", "https://oc.2026669.xyz:60802/v1"),
                   api_key=setting("OPENAI_API_KEY"), timeout=300, max_retries=1)
+
+
+# The vision model each engine the customer picked is translated with. The gateway
+# translates GPT-5.6 / GPT-6 orders with the same models, so a scanned order is
+# translated by the model the customer paid for. VISION_MODEL overrides both.
+VISION_MODELS = {"GPT-5.6": "gpt-5.6-luna", "GPT-6": "gpt-6-luna"}
+
+
+def vision_model(engine: str) -> str:
+    override = os.environ.get("VISION_MODEL")
+    if override:
+        return override
+    return VISION_MODELS.get(engine, VISION_MODELS["GPT-5.6"])
 
 
 def ready(client) -> str:
@@ -270,7 +283,7 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
         job = scan_pipeline.Job(
             source=source, workdir=workdir, lang_in=job_info.get("lang_in", "en"),
             lang_out=job_info.get("lang_out", "zh"), output=job_info.get("output", "dual"),
-            model=setting("VISION_MODEL", "codex/gpt-5.6-luna"),
+            model=vision_model(job_info.get("engine", "")),
             workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
             progress=lambda stage, pct: (beat.update(stage, pct), log.info("%s %s %.0f%%", order_id, stage, pct)),
@@ -406,7 +419,7 @@ def main():
         out.mkdir(parents=True, exist_ok=True)
         job = scan_pipeline.Job(
             source=Path(args.input).resolve(), workdir=out / "work", lang_in=args.lang_in, lang_out=args.lang_out,
-            output=args.output, model=setting("VISION_MODEL", "codex/gpt-5.6-luna"),
+            output=args.output, model=vision_model(""),
             workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
             progress=lambda stage, pct: print(f"[{pct:5.1f}%] {stage}", flush=True), full_qa=args.full_qa)

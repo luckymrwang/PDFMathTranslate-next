@@ -77,7 +77,7 @@ class Job:
     lang_in: str = "en"
     lang_out: str = "zh"
     output: str = "dual"  # dual | mono | both
-    model: str = "codex/gpt-5.6-luna"  # comma-separated: fallbacks used when one runs out of quota
+    model: str = "gpt-5.6-luna"  # comma-separated: fallbacks used when one runs out of quota
     workers: int = 8
     render_procs: int = 3
     ocrmypdf: str = "ocrmypdf"

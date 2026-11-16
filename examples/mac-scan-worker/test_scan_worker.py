@@ -70,6 +70,16 @@ class ScanWorkerTest(unittest.TestCase):
         with mock.patch.object(scan_pipeline, "process", process):
             return scan_worker.handle(gateway_for(fake), object(), dict(JOB), self.root)
 
+    def test_vision_model_follows_the_order_engine(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VISION_MODEL", None)
+            self.assertEqual(scan_worker.vision_model("GPT-5.6"), "gpt-5.6-luna")
+            self.assertEqual(scan_worker.vision_model("GPT-6"), "gpt-6-luna")
+            self.assertEqual(scan_worker.vision_model(""), "gpt-5.6-luna")
+            os.environ["VISION_MODEL"] = "gpt-6.1-sol,gpt-6-luna"
+            self.assertEqual(scan_worker.vision_model("GPT-5.6"), "gpt-6.1-sol,gpt-6-luna",
+                             "VISION_MODEL overrides the engine's model")
+
     def test_success_downloads_verified_source_and_uploads_both_formats(self):
         fake = FakeGateway()
 
