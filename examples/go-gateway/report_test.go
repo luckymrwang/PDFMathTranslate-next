@@ -51,7 +51,7 @@ func TestPaymentAlertSentOnceWithDailyTotal(t *testing.T) {
 	if line := s.todaySales(time.Now()); !strings.Contains(line, "付费 1 单 ¥2.10") {
 		t.Fatal("today's total missing the sale:", line)
 	}
-	if summary := orderSummary(paid); !strings.Contains(summary, "扫描件 8 折，省 ¥0.90") {
+	if summary := orderSummary(paid); !strings.Contains(summary, "GPT 8 折，省 ¥0.90") {
 		t.Fatal("alert should mention the scan discount:", summary)
 	}
 }

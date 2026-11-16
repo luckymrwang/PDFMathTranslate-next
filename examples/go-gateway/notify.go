@@ -120,7 +120,7 @@ func orderSummary(o PayOrder) string {
 		lines = append(lines, "类型：扫描件")
 	}
 	if o.ScanDiscount > 0 {
-		lines = append(lines, fmt.Sprintf("优惠：扫描件 %d 折，省 ¥%.2f", (100-scanDiscountPercent)/10, float64(o.ScanDiscount)/100))
+		lines = append(lines, fmt.Sprintf("优惠：GPT %d 折，省 ¥%.2f", (100-scanDiscountPercent)/10, float64(o.ScanDiscount)/100))
 	}
 	return strings.Join(lines, "\n")
 }

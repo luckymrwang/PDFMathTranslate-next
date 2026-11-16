@@ -21,7 +21,7 @@ type PayConfig struct {
 	StandardPrice, EnhancedPrice              int
 	// Engines priced separately; others use the standard or enhanced product.
 	EngineProducts map[string]enginePrice
-	// ScanProducts are the discounted per-page products a scanned order is bought as
+	// ScanProducts are the discounted (8折) per-page products GPT orders are bought as
 	// (see scanDeal); an engine without one falls back to free pages.
 	ScanProducts map[string]enginePrice
 	// iOS (Apple) rejects orders under iosMinFen. With an iOS unit product configured,
@@ -130,7 +130,7 @@ func (c *PayConfig) productFor(engine string) (string, int) {
 	return c.EnhancedProduct, c.EnhancedPrice
 }
 
-// scanDeal prices a scanned order of pages on engine. With a discounted scan product
+// scanDeal prices a GPT order (scanned or not) of pages on engine. With a discounted product
 // whose saving stays within scanDiscountCapFen, the order is bought as that product
 // (free == 0). Otherwise the discount is taken as whole free pages at the normal
 // price, which also applies the cap. Engines that cannot read scans get nothing.
@@ -199,10 +199,10 @@ type PayOrder struct {
 	Scanned bool
 	// PaidAt is when the platform confirmed the cash payment (0 before it existed).
 	PaidAt int64
-	// ScanFreePages are pages of a scanned PDF left out of Quantity: the scan discount
+	// ScanFreePages are pages left out of Quantity: the GPT 8折 discount
 	// when no discounted scan product applies (see scanDeal).
 	ScanFreePages int
-	// ScanDiscount is what the scan discount saved (fen, at the normal list price),
+	// ScanDiscount is what the GPT 8折 discount saved (fen, at the normal list price),
 	// whether as free pages or as a cheaper scan product.
 	ScanDiscount int
 	// ScanWorker routes the order to the Mac scan worker instead of the Python API.
@@ -334,9 +334,9 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed, free int, price func(*
 	}
 	defer tx.Rollback()
 	candidate := *order
-	// The scan discount is expressed in whole pages because WeChat charges a
+	// Past the 8折 cap the discount is taken as whole pages, because WeChat charges a
 	// registered price per page; the caller sizes it for this document.
-	if free > 0 && candidate.Scanned && !candidate.Trial && billed > free {
+	if free > 0 && !candidate.Trial && billed > free {
 		candidate.ScanFreePages = free
 		billed -= free
 	}
@@ -375,7 +375,7 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed, free int, price func(*
 	return nil
 }
 
-// Every scanned order is discounted: scanDiscountPercent off, at most
+// Every GPT-5.6 / GPT-6 order is discounted: scanDiscountPercent off, at most
 // scanDiscountCapFen. WeChat bills a registered price per page, so the discount is
 // taken as whole pages; ceil() means the real saving is the stated one or better.
 const (

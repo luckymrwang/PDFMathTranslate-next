@@ -255,7 +255,7 @@ func TestScannedOrdersGetTheScanDiscount(t *testing.T) {
 		id, _ := newTradeNo()
 		order := PayOrder{ID: id, OpenID: owner, Pages: pages, Engine: engine, State: "pending",
 			Scanned: scanned, CreatedAt: time.Now().Unix()}
-		free := s.scanDiscountFor(engine, pages, scanned)
+		free := s.scanDiscountFor(engine, pages)
 		if err := store.addPurchase(&order, pages, free, func(o *PayOrder, remaining int) error {
 			o.Quantity, o.Total = remaining, remaining*30
 			return nil
@@ -279,8 +279,10 @@ func TestScannedOrdersGetTheScanDiscount(t *testing.T) {
 	if again := buy("owner", "GPT-5.6", 10, true); again.ScanFreePages != 2 {
 		t.Fatal("every scanned order is discounted, not only the first", again.ScanFreePages)
 	}
+	if text := buy("text", "GPT-5.6", 10, false); text.ScanFreePages != 2 {
+		t.Fatal("a text PDF on GPT gets the 8折 too", text.ScanFreePages)
+	}
 	for name, order := range map[string]PayOrder{
-		"text PDF":         buy("text", "GPT-5.6", 10, false),
 		"one-page scan":    buy("tiny", "GPT-5.6", 1, true),
 		"text-only engine": buy("bing", "Bing", 10, true),
 	} {
@@ -316,7 +318,7 @@ func TestScannedOrdersAreBoughtAsTheScanProduct(t *testing.T) {
 		id, _ := newTradeNo()
 		order := PayOrder{ID: id, OpenID: "owner", Pages: pages, Engine: engine, State: "pending",
 			Scanned: true, CreatedAt: time.Now().Unix()}
-		free := s.scanDiscountFor(engine, pages, true)
+		free := s.scanDiscountFor(engine, pages)
 		if err := s.pay.store.addPurchase(&order, pages, free, func(o *PayOrder, remaining int) error {
 			return s.pricePurchase(o, remaining, platform, "session")
 		}); err != nil {
@@ -345,6 +347,12 @@ func TestScannedOrdersAreBoughtAsTheScanProduct(t *testing.T) {
 	s.pay.cfg.IOSProduct, s.pay.cfg.IOSUnit = "ios", 50
 	if ios := buy("GPT-5.6", 10, "ios"); ios.ProductID != "ios" || ios.Total != 400 || ios.ScanDiscount != 100 {
 		t.Fatalf("iOS rounds the scan price into its own units: %+v", ios)
+	}
+	text := PayOrder{ID: "Ttext", OpenID: "owner", Pages: 10, Engine: "GPT-5.6", State: "pending", CreatedAt: time.Now().Unix()}
+	if err := s.pay.store.addPurchase(&text, 10, s.scanDiscountFor("GPT-5.6", 10), func(o *PayOrder, remaining int) error {
+		return s.pricePurchase(o, remaining, "", "session")
+	}); err != nil || text.ProductID != "scan-enhanced" || text.Total != 400 {
+		t.Fatalf("a text PDF on GPT-5.6 is bought at 8折 too: %v %+v", err, text)
 	}
 	if bing := buy("Bing", 10, ""); bing.ScanDiscount != 0 || bing.ScanFreePages != 0 {
 		t.Fatalf("a text-only engine is not discounted: %+v", bing)

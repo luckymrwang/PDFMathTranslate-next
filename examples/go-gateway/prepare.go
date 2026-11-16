@@ -370,7 +370,7 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 		Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
 		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, Output: output, Scanned: file.Scanned}
-	free := s.scanDiscountFor(order.Engine, billed, order.Scanned)
+	free := s.scanDiscountFor(order.Engine, billed)
 	err = s.pay.store.addPurchase(&order, billed, free, func(o *PayOrder, remaining int) error { return s.pricePurchase(o, remaining, input.Platform, session) })
 	if err != nil {
 		writePurchaseError(w, err)

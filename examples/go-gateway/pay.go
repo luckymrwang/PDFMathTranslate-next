@@ -311,7 +311,7 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		LangIn: data.LangIn, LangOut: data.LangOut, FilePath: stagedPath,
 		FileHash: hex.EncodeToString(hash.Sum(nil)), Name: filepath.Base(header.Filename),
 		State: "pending", CreatedAt: time.Now().Unix(), Attach: id, Output: output, Scanned: inspected.Scanned}
-	free := s.scanDiscountFor(order.Engine, inspected.Pages, order.Scanned)
+	free := s.scanDiscountFor(order.Engine, inspected.Pages)
 	if err := s.pay.store.addPurchase(&order, inspected.Pages, free, func(o *PayOrder, remaining int) error {
 		return s.pricePurchase(o, remaining, data.Platform, sessionKey)
 	}); err != nil {
@@ -814,12 +814,9 @@ func (s *Server) resumePaid(id string) {
 var errCashDisabled = errors.New("付费翻译暂未开放，积分不足以抵扣全文")
 var errPaymentSession = errors.New("请重新登录后支付")
 
-// scanDiscountFor is the free pages a scanned order gets when it is not bought as a
-// discounted scan product. The client's preview uses the same rule.
-func (s *Server) scanDiscountFor(engine string, pages int, scanned bool) int {
-	if !scanned {
-		return 0
-	}
+// scanDiscountFor is the free pages a GPT order gets when it is not bought as the
+// discounted 8折 product (past the cap). The client's preview uses the same rule.
+func (s *Server) scanDiscountFor(engine string, pages int) int {
 	_, _, free := s.pay.cfg.scanDeal(engine, pages)
 	return free
 }
@@ -837,7 +834,7 @@ func (s *Server) pricePurchase(o *PayOrder, remaining int, platform, session str
 	}
 	ios := platform == "ios"
 	o.ProductID, o.UnitPrice, o.Quantity, o.Total = s.pay.cfg.orderAmounts(o.Engine, remaining, ios)
-	if o.Scanned {
+	if isScanEngine(o.Engine) {
 		_, full := s.pay.cfg.productFor(o.Engine)
 		// Free pages were already left out of remaining; a scan product is bought instead.
 		if product, unit, free := s.pay.cfg.scanDeal(o.Engine, remaining); product != "" && free == 0 && o.ScanFreePages == 0 {

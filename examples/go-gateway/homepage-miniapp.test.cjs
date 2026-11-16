@@ -225,34 +225,35 @@ async function run() {
   home.scanDialogContinue()
   assert.equal(await ready, true, 'The user may still pay with a text-only engine')
   assert.equal(await home.scanReadyToPay(), true, 'and is asked only once for that engine')
-  // Scan discount: every scanned order leaves 8折 worth of whole pages off the bill.
-  home.setData({ scanEngines: ['GPT-5.6', 'GPT-6'], scanDiscountPercent: 0, scanDiscountCapFen: 0 })
+  // GPT 8折 (every PDF): without a scan product, whole pages come off the bill.
+  const basePrices = home.payPrices
+  home.payPrices = { ...(basePrices || {}), scan_discount_percent: 0, scan_discount_cap_fen: 0 }
   const fullScan = home.quoteValues(10, 'GPT-5.6').paymentTotal
-  home.setData({ scanDiscountPercent: 20, scanDiscountCapFen: 2000 })
+  home.payPrices = { ...(basePrices || {}), scan_discount_percent: 20, scan_discount_cap_fen: 2000 }
+  home.setData({ scanEngines: [] })
   const discounted = home.quoteValues(10, 'GPT-5.6')
-  assert.equal(discounted.scanFreePages, 2, '20% of 10 pages')
+  assert.equal(discounted.scanFreePages, 2, '20% of 10 pages, text PDFs included')
   assert.equal(discounted.scanDiscountLabel, '8 折')
   assert.equal(discounted.scanFreeAmount, '0.60', '2 pages at 0.30')
   assert.equal(Number(discounted.paymentTotal), Number(fullScan) - 0.6, 'the quote drops by the discount')
-  assert.equal(home.quoteValues(10, 'GPT-6').scanFreePages, 2, 'every scan engine is discounted')
-  assert.equal(home.quoteValues(1, 'GPT-5.6').scanFreePages, 0, 'A one-page scan is never free')
+  assert.equal(home.quoteValues(10, 'GPT-6').scanFreePages, 2, 'GPT-6 is discounted too')
+  assert.equal(home.quoteValues(1, 'GPT-5.6').scanFreePages, 0, 'A one-page order is never free')
   assert.equal(home.quoteValues(500, 'GPT-5.6').scanFreePages, 66, 'Capped at ¥20')
-  assert.equal(home.quoteValues(10, 'Bing').scanFreePages, 0, 'Text-only engines are not discounted')
-  // With an 8折 scan product the scan is bought at that price instead of free pages.
+  assert.equal(home.quoteValues(10, 'Bing').scanFreePages, 0, 'Other engines are not discounted')
+  // With an 8折 product the order is bought at that price instead of free pages.
   const savedUpgrade = home.upgrade
   home.upgrade = null
-  home.payPrices = { ...(home.payPrices || {}), enhanced_price_fen: 30, scan_prices_fen: { 'GPT-5.6': 24 } }
+  home.payPrices = { ...home.payPrices, enhanced_price_fen: 30, scan_prices_fen: { 'GPT-5.6': 24 } }
   const atScanPrice = home.quoteValues(2, 'GPT-5.6')
   assert.equal(atScanPrice.scanFreePages, 0)
   assert.equal(atScanPrice.scanFreeAmount, '0.12', '2 pages × ¥0.06 off')
   assert.equal(atScanPrice.paymentTotal, '0.48', 'exactly 8折 of ¥0.60')
   assert.equal(home.quoteValues(500, 'GPT-5.6').scanFreePages, 66, 'past the ¥20 cap it falls back to free pages')
   const card = home.upgradeChoices(2).find(item => item.engine === 'GPT-5.6')
-  assert.equal(card.price + '|' + card.listPrice, '0.24 元/页|0.3 元/页', 'card shows the struck list price over the scan price')
+  assert.equal(card.price + '|' + card.listPrice + '|' + card.saleLabel, '0.24 元/页|0.3 元/页|8折', 'card shows the struck list price, 8折 tag and scan price')
   home.upgrade = savedUpgrade
-  home.setData({ scanEngines: [], scanDiscountPercent: 0, scanDiscountCapFen: 0 })
+  home.payPrices = basePrices
   assert.equal(home.scanValues('Bing').scanWarn, false, 'Text PDFs show no scan note')
-  assert.equal(home.quoteValues(10, 'GPT-5.6').scanFreePages, 0, 'Text PDFs are not discounted')
   // Output format: remembered, carried by the job, unknown values fall back to dual.
   home.selectOutput({ currentTarget: { dataset: { value: 'both' } } })
   assert.equal(home.data.output, 'both')
