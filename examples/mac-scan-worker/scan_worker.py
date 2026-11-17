@@ -17,6 +17,7 @@ which stops the work here.
 Settings come from the environment or ~/.config/pdfmath-scan-worker.env (KEY=VALUE):
   GATEWAY_URL, SCAN_WORKER_TOKEN                      gateway and its shared token
   OPENAI_BASE_URL, OPENAI_API_KEY, VISION_MODEL       model endpoint (image input)
+  REVIEW_MODEL (gpt-5.6-luna)                         quality review + glossary, any engine
   OCRMYPDF                                            ocrmypdf with the appleocr plugin
   WORK_DIR, TRANSLATE_WORKERS, GLOSSARY_FILE         optional
   LONG_POLL_SECONDS (300), NIGHT_HOURS (1-7), NIGHT_IDLE_SECONDS (1500), HOLD_PROBLEM_PAGES (5)
@@ -26,6 +27,7 @@ answers as soon as an order is queued. During NIGHT_HOURS the worker additionall
 sleeps NIGHT_IDLE_SECONDS between polls (and tells the gateway, so that is not
 mistaken for being offline). Large orders (full_qa from the gateway) are delivered
 when fewer than HOLD_PROBLEM_PAGES pages still fail quality control, else held.
+Other orders get a rule-gated light check and are always delivered.
 """
 from __future__ import annotations
 
@@ -178,6 +180,11 @@ def vision_model(engine: str) -> str:
     return VISION_MODELS.get(engine, VISION_MODELS["GPT-5.6"])
 
 
+def review_model() -> str:
+    """Quality review and glossary only judge or list: the cheap model, whatever the engine."""
+    return os.environ.get("REVIEW_MODEL") or VISION_MODELS["GPT-5.6"]
+
+
 def ready(client) -> str:
     """Empty when the Mac can take work, else why not (checked before claiming)."""
     if not Path(os.path.expanduser(setting("OCRMYPDF"))).exists():
@@ -308,7 +315,7 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
         job = scan_pipeline.Job(
             source=source, workdir=workdir, lang_in=job_info.get("lang_in", "en"),
             lang_out=job_info.get("lang_out", "zh"), output=job_info.get("output", "dual"),
-            model=vision_model(job_info.get("engine", "")),
+            model=vision_model(job_info.get("engine", "")), review_model=review_model(),
             workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
             progress=lambda stage, pct: (beat.update(stage, pct), log.info("%s %s %.0f%%", order_id, stage, pct)),
@@ -319,7 +326,8 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
         report, hold = "", False
         if job.report:
             report = scan_pipeline.format_report(job.report)
-            hold = len(job.report["problems"]) >= int(setting("HOLD_PROBLEM_PAGES", "5"))
+            # Only large orders are held; a light check never blocks a small one.
+            hold = job.full_qa and len(job.report["problems"]) >= int(setting("HOLD_PROBLEM_PAGES", "5"))
         gateway.upload(order_id, results, report=report, hold=hold)
         log.info("order %s %s", order_id, "held for review" if hold else "delivered")
         scan_pipeline.cleanup(workdir)
@@ -454,7 +462,7 @@ def main():
         out.mkdir(parents=True, exist_ok=True)
         job = scan_pipeline.Job(
             source=Path(args.input).resolve(), workdir=out / "work", lang_in=args.lang_in, lang_out=args.lang_out,
-            output=args.output, model=vision_model(""),
+            output=args.output, model=vision_model(""), review_model=review_model(),
             workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
             progress=lambda stage, pct: print(f"[{pct:5.1f}%] {stage}", flush=True), full_qa=args.full_qa,

@@ -440,13 +440,23 @@ func (s *Server) scanResult(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	s.deliverScanOrder(id)
-	title := "扫描件订单已自动交付"
-	if report != "" {
-		title = "大额扫描件已交付（质检通过）"
-	}
 	delivered, _ := s.pay.store.get(id)
-	s.notify(title, orderSummary(delivered)+optionalLine(report))
+	s.notify(scanDeliveredTitle(delivered, report), orderSummary(delivered)+optionalLine(report))
 	writeJSON(w, http.StatusOK, map[string]string{"delivery": "archived"})
+}
+
+// scanDeliveredTitle names the alert for a delivered scan order. Every order now
+// carries a report when the Mac's quality check found something; only large orders
+// get the full review, so only they are announced as such.
+func scanDeliveredTitle(o PayOrder, report string) string {
+	switch {
+	case report == "":
+		return "扫描件订单已自动交付"
+	case scanFullQA(o):
+		return "大额扫描件已交付（质检通过）"
+	default:
+		return "扫描件订单已自动交付（自动质检有发现）"
+	}
 }
 
 func optionalLine(text string) string {

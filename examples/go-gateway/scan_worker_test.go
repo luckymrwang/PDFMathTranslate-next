@@ -517,3 +517,20 @@ func TestSmallOrderSkipsFullQualityControl(t *testing.T) {
 		t.Fatal("threshold must be pages × ¥0.4 > ¥30")
 	}
 }
+
+func TestScanDeliveredAlertOnlyCallsLargeOrdersReviewed(t *testing.T) {
+	small, large := PayOrder{Pages: 3}, PayOrder{Pages: 80}
+	for _, c := range []struct {
+		order  PayOrder
+		report string
+		want   string
+	}{
+		{small, "", "扫描件订单已自动交付"},
+		{small, "自动质检：3 页规则检查，1 页可疑", "扫描件订单已自动交付（自动质检有发现）"},
+		{large, "质检：80 页", "大额扫描件已交付（质检通过）"},
+	} {
+		if got := scanDeliveredTitle(c.order, c.report); got != c.want {
+			t.Fatalf("pages=%d report=%q: got %q, want %q", c.order.Pages, c.report, got, c.want)
+		}
+	}
+}

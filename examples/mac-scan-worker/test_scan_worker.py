@@ -179,6 +179,26 @@ class ScanWorkerTest(unittest.TestCase):
         fake = self.run_qa_order(5)
         self.assertTrue(fake.hold)
 
+    def test_small_order_with_a_light_report_is_never_held(self):
+        fake = FakeGateway()
+
+        def process(job, client):
+            self.assertFalse(job.full_qa)
+            self.assertEqual(job.review_model, "gpt-5.6-luna", "review runs on the cheap model")
+            job.report = {"light": True, "pages": 9, "terms": 0, "checked": 8, "redone": 7,
+                          "problems": [{"page": n, "issues": ["残留原文"]} for n in range(1, 8)]}
+            path = job.workdir / "dual.pdf"
+            path.write_bytes(b"%PDF-dual")
+            return {"dual": path}
+
+        with mock.patch.object(scan_pipeline, "process", process):
+            scan_worker.handle(gateway_for(fake), object(), dict(JOB, output="dual", engine="GPT-6"), self.root)
+        self.assertFalse(fake.hold, "7 failing pages still deliver a small order")
+        self.assertTrue(fake.report, "the light report still reaches the gateway")
+        text = scan_pipeline.format_report({"light": True, "pages": 9, "checked": 8, "redone": 7, "problems": []})
+        self.assertIn("自动质检：9 页规则检查，8 页可疑，复核确认 7 页已重做", text)
+        self.assertNotIn("术语表", text, "the light check builds no glossary")
+
     def test_release_uploads_replacement(self):
         fake = FakeGateway()
         path = self.root / "fixed.pdf"
@@ -300,7 +320,7 @@ class ScanWorkerTest(unittest.TestCase):
         calls = []
 
         def create(model, messages, **kwargs):  # noqa: ARG001 - mirrors the OpenAI signature
-            calls.append({"system": messages[0]["content"], "kwargs": kwargs,
+            calls.append({"system": messages[0]["content"], "kwargs": kwargs, "model": model,
                           "images": sum(c["type"] == "image_url" for c in messages[1]["content"])})
             if refuse_temperature and "temperature" in kwargs:
                 raise RuntimeError("Unsupported parameter: 'temperature'")
@@ -360,6 +380,74 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertIn(rule, review, "review checks names by the same rule")
         self.assertNotIn("人名、签名、纯数字", review, "review no longer excuses every name")
         self.assertNotIn("签名、人名", scan_pipeline.ORPHAN_PROMPT)
+
+    def test_review_and_glossary_use_the_cheap_model_translation_keeps_the_paid_one(self):
+        pdf = self._page_pdf(self.root / "models.pdf", ["First real sentence here"])
+        job = self._job("models")
+        job.model, job.review_model = "gpt-6-luna", "gpt-5.6-luna"
+        client, calls = self._model([{"terms": []}, {"ok": True, "issues": []},
+                                     {"groups": [{"ids": [0], "tr": "第一句"}], "keep": []}])
+        scan_pipeline.extract_terms(job, client, pdf, None)
+        page = scan_pipeline.pymupdf.open(pdf)[0]
+        scan_pipeline.review_page(job, client, page, page)
+        scan_pipeline.translate_page(job, client, pdf, pdf, 0, None, ["上一版残留原文"])
+        self.assertEqual([c["model"] for c in calls], ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-6-luna"])
+        job = self._job("models2")
+        job.model = "gpt-6-luna"  # no review model set: everything stays on the order's model
+        client, calls = self._model([{"ok": True, "issues": []}])
+        scan_pipeline.review_page(job, client, page, page)
+        self.assertEqual(calls[0]["model"], "gpt-6-luna")
+
+    def _light_run(self, hits, reviews, error=None):
+        job = self._job("light")
+        job.output = "dual"
+        seen = {"render": [], "check": [], "translate": []}
+
+        def rule_hits(job, ocr, tess, pages):
+            return hits
+
+        def render(job, upright, ocr, tess, total, chunk_ids, lo, hi, mono=False, dual=True):
+            seen["render"].append((list(chunk_ids), mono, dual))
+
+        def quality(job, client, upright, ocr, tess, pages, lo, hi, confirm=False):
+            seen["check"].append((list(pages), confirm))
+            if error:
+                raise error
+            return reviews.pop(0)
+
+        def translate_all(job, client, upright, ocr, tess, pages, lo, hi, feedback=None):
+            seen["translate"].append((list(pages), feedback))
+
+        with mock.patch.multiple(scan_pipeline, _rule_hits=rule_hits, _render=render,
+                                 _quality_check=quality, _translate_all=translate_all):
+            scan_pipeline._light_quality_check(job, object(), "upright", "ocr", None, 3)
+        return job, seen
+
+    def test_light_check_costs_nothing_when_the_rules_find_nothing(self):
+        job, seen = self._light_run({}, [])
+        self.assertEqual(seen, {"render": [], "check": [], "translate": []})
+        self.assertEqual(job.report, {}, "no report, so the gateway sends the usual alert")
+
+    def test_light_check_reviews_only_flagged_pages_and_skips_redo_the_review_rejects(self):
+        job, seen = self._light_run({1: ["译文过挤或字号过小（5.2pt）：x"]}, [{}])
+        self.assertEqual(seen["check"], [([1], True)], "only the flagged page, review must confirm")
+        self.assertEqual(seen["render"], [([0], True, False)], "mono for the review, dual untouched")
+        self.assertEqual(seen["translate"], [], "tight text alone is not translated again")
+        self.assertEqual((job.report["checked"], job.report["redone"], job.report["problems"]), (1, 0, []))
+
+    def test_light_check_redoes_confirmed_pages_with_the_findings(self):
+        found = {2: ["残留原文：本合同自签订之日起生效"]}
+        job, seen = self._light_run({0: ["译文过挤"], 2: ["残留原文"]}, [dict(found), {}])
+        self.assertEqual(seen["check"], [([0, 2], True), ([2], True)], "redone page is checked again")
+        self.assertEqual(seen["translate"], [([2], found)])
+        self.assertEqual(seen["render"][-1], ([0], True, True), "redo renders the delivered pages too")
+        self.assertEqual((job.report["redone"], job.report["problems"]), (1, []))
+
+    def test_light_check_failure_delivers_the_first_translation(self):
+        job, seen = self._light_run({0: ["残留原文"]}, [], error=scan_pipeline.QuotaExhausted("usage limit"))
+        self.assertEqual(seen["translate"], [])
+        self.assertIn("QuotaExhausted", job.report["review_error"])
+        self.assertIn("复核未完成，按首轮译文交付", scan_pipeline.format_report(job.report))
 
     def test_orphan_pass_sees_the_page(self):
         pdf = self._page_pdf(self.root / "orphan.pdf", ["First real sentence here", "Another real sentence here"])

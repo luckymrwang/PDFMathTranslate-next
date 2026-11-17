@@ -91,13 +91,19 @@ class Job:
     lang_out: str = "zh"
     output: str = "dual"  # dual | mono | both
     model: str = "gpt-5.6-luna"  # comma-separated: fallbacks used when one runs out of quota
+    # Quality review and the glossary only judge or list, so a cheaper model does;
+    # translations and redos stay on `model`, the one the customer paid for. Empty: `model`.
+    review_model: str = ""
     workers: int = 8
     render_procs: int = 3
     ocrmypdf: str = "ocrmypdf"
     glossary: str = ""
     progress: Callable[[str, float], None] = lambda stage, pct: None
     should_stop: Callable[[], bool] = lambda: False
-    full_qa: bool = False  # glossary + rule checks + vision review + one redo (large orders)
+    full_qa: bool = False  # glossary + vision review of every page + one redo (large orders)
+    # Every other order: free rule checks on every page; only pages they flag get a
+    # vision review, and only pages the review confirms are translated again.
+    light_qa: bool = True
     # Page translations and glossaries shared across orders, keyed by the OCR content,
     # model, languages and prompts: the same file ordered again gets the same result.
     shared_cache: Path | None = None
@@ -364,12 +370,14 @@ def _system_prompt(job: Job, page: pymupdf.Page) -> str:
     return prompt + job.glossary
 
 
-def _chat(job: Job, client, system: str, payload, images: list[str], what: str, key: str) -> dict:
+def _chat(job: Job, client, system: str, payload, images: list[str], what: str, key: str,
+          model: str = "") -> dict:
     """One JSON-answer model call with retries, quota fallback and cancellation."""
     last = None
+    model = model or job.model
     for _ in range(4):
         _check(job)
-        models = [m.strip() for m in job.model.split(",") if m.strip() and m.strip() not in job.exhausted]
+        models = [m.strip() for m in model.split(",") if m.strip() and m.strip() not in job.exhausted]
         if not models:
             raise QuotaExhausted(str(last))
         try:
@@ -642,7 +650,7 @@ def extract_terms(job: Job, client, ocr: Path, tess: Path | None) -> int:
         shared = _shared_path(job, "terms", text, prompt, job.glossary)
         terms = _read_shared(shared)
         if terms is None:
-            answer = _chat(job, client, prompt, text, [], "glossary", "terms")
+            answer = _chat(job, client, prompt, text, [], "glossary", "terms", job.review_model)
             terms = [t for t in answer["terms"] if isinstance(t, dict) and t.get("src") and t.get("tgt")][:80]
             _write_shared(shared, terms)
         write_atomic(cache, json.dumps(terms, ensure_ascii=False))
@@ -676,7 +684,7 @@ def review_page(job: Job, client, original: pymupdf.Page, translated: pymupdf.Pa
     prompt = REVIEW_PROMPT.format(source=LANG_NAMES.get(job.lang_in, job.lang_in),
                                   target=LANG_NAMES.get(job.lang_out, job.lang_out))
     answer = _chat(job, client, prompt, "请质检这一页。", [_jpeg(original, 110), _jpeg(translated, 110)],
-                   "review", "ok")
+                   "review", "ok", job.review_model)
     serious = []
     for item in answer.get("issues") or []:
         if isinstance(item, dict):
@@ -715,9 +723,10 @@ def _translate_all(job: Job, client, upright, ocr, tess, pages, lo, hi, feedback
             raise
 
 
-def _render(job: Job, upright, ocr, tess, total, chunk_ids, lo, hi):
-    want_dual = job.output in ("dual", "both")
-    want_mono = job.output in ("mono", "both") or job.full_qa  # mono pages are what gets reviewed
+def _render(job: Job, upright, ocr, tess, total, chunk_ids, lo, hi, mono: bool = False, dual: bool = True):
+    """Render chunks; `mono` adds mono pages for a review even when not delivered."""
+    want_dual = dual and job.output in ("dual", "both")
+    want_mono = job.output in ("mono", "both") or job.full_qa or mono  # mono pages are what gets reviewed
     chunks = [list(range(i, min(i + CHUNK, total))) for i in range(0, total, CHUNK)]
     tasks = [(str(upright), str(ocr), str(tess) if tess else "", str(job.workdir / "cache"), chunks[n],
               job.lang_out, str(job.workdir / f"dual_{n:04d}.pdf") if want_dual else "",
@@ -729,8 +738,25 @@ def _render(job: Job, upright, ocr, tess, total, chunk_ids, lo, hi):
     return len(chunks)
 
 
-def _quality_check(job: Job, client, upright, ocr, tess, pages, lo, hi) -> dict[int, list[str]]:
-    """Issues per page (rule checks + vision review), only pages with issues returned."""
+def _rule_hits(job: Job, ocr, tess, pages) -> dict[int, list[str]]:
+    """Free rule checks (no model call) on rendered pages; only pages with findings."""
+    ocr_doc, cache, hits = pymupdf.open(ocr), job.workdir / "cache", {}
+    for i in pages:
+        lines = ocr_lines(ocr_doc[i], _backup_page(tess, i))
+        result = json.loads((cache / f"{i + 1:04d}.json").read_text())
+        info = json.loads((cache / f"{i + 1:04d}.render.json").read_text())
+        issues = rule_issues(lines, result, info)
+        if issues:
+            hits[i] = issues
+    return hits
+
+
+def _quality_check(job: Job, client, upright, ocr, tess, pages, lo, hi, confirm: bool = False) -> dict[int, list[str]]:
+    """Issues per page (rule checks + vision review), only pages with issues returned.
+
+    With confirm, a page counts only when the vision review finds a serious issue;
+    rule findings alone (often just tight text a redo cannot fix) do not.
+    """
     orig, ocr_doc = pymupdf.open(upright), pymupdf.open(ocr)
     cache = job.workdir / "cache"
 
@@ -740,8 +766,10 @@ def _quality_check(job: Job, client, upright, ocr, tess, pages, lo, hi) -> dict[
         info = json.loads((cache / f"{i + 1:04d}.render.json").read_text())
         issues = rule_issues(lines, result, info)
         with pymupdf.open(job.workdir / f"mono_{i // CHUNK:04d}.pdf") as mono:
-            issues += review_page(job, client, orig[i], mono[i % CHUNK])
-        return i, issues
+            serious = review_page(job, client, orig[i], mono[i % CHUNK])
+        if confirm and not serious:
+            return i, []
+        return i, issues + serious
 
     found, done = {}, 0
     with ThreadPoolExecutor(job.workers) as pool:
@@ -755,9 +783,15 @@ def _quality_check(job: Job, client, upright, ocr, tess, pages, lo, hi) -> dict[
 
 
 def format_report(report: dict) -> str:
-    lines = [f"术语表：统一 {report['terms']} 个术语",
-             f"质检：{report['pages']} 页，首轮 {report['redone']} 页有问题已重做，"
-             f"最终 {len(report['problems'])} 页仍有问题"]
+    if report.get("light"):
+        lines = [f"自动质检：{report['pages']} 页规则检查，{report['checked']} 页可疑，"
+                 f"复核确认 {report['redone']} 页已重做，最终 {len(report['problems'])} 页仍有问题"]
+        if report.get("review_error"):
+            lines.append("复核未完成，按首轮译文交付：" + report["review_error"][:120])
+    else:
+        lines = [f"术语表：统一 {report['terms']} 个术语",
+                 f"质检：{report['pages']} 页，首轮 {report['redone']} 页有问题已重做，"
+                 f"最终 {len(report['problems'])} 页仍有问题"]
     for item in report["problems"][:10]:
         lines.append(f"· 第 {item['page']} 页：" + "；".join(item["issues"])[:150])
     if len(report["problems"]) > 10:
@@ -770,7 +804,8 @@ def process(job: Job, client) -> dict:
 
     With job.full_qa, a document-wide glossary is built first, every page is then
     checked (rules + vision review), pages with issues are translated again once with
-    the issues as feedback, and job.report lists what still fails.
+    the issues as feedback, and job.report lists what still fails. Every other order
+    gets the rule-gated light check (_light_quality_check).
     """
     job.workdir.mkdir(parents=True, exist_ok=True)
     (job.workdir / "cache").mkdir(exist_ok=True)
@@ -808,6 +843,8 @@ def process(job: Job, client) -> dict:
             problems = _quality_check(job, client, upright, ocr, tess, redo, 96, 98)
         job.report = {"pages": total, "terms": terms, "redone": len(found),
                       "problems": [{"page": i + 1, "issues": problems[i]} for i in sorted(problems)]}
+    elif job.light_qa:
+        _light_quality_check(job, client, upright, ocr, tess, total)
 
     results = {}
     for kind in ("dual", "mono"):
@@ -816,6 +853,49 @@ def process(job: Job, client) -> dict:
             _merge([job.workdir / f"{kind}_{n:04d}.pdf" for n in range(chunk_count)], dest)
             results[kind] = dest
     return results
+
+
+def _light_quality_check(job: Job, client, upright, ocr, tess, total):
+    """Quality control priced for every order: rules first, the model only where they hit.
+
+    Pages the free rule checks flag get a vision review; pages the review confirms are
+    translated again once with its findings and checked again. The review is optional:
+    if it cannot run, the first translation is delivered. job.report stays empty when
+    the rules find nothing.
+    """
+    hits = _rule_hits(job, ocr, tess, range(total))
+    if not hits:
+        return
+    flagged = sorted(hits)
+    report = {"light": True, "pages": total, "terms": 0, "checked": len(flagged), "redone": 0, "problems": []}
+    job.report = report
+    chunks = sorted({i // CHUNK for i in flagged})
+    try:
+        if job.output not in ("mono", "both"):  # the review looks at mono pages
+            _render(job, upright, ocr, tess, total, chunks, 98, 98.3, mono=True, dual=False)
+        found = _quality_check(job, client, upright, ocr, tess, flagged, 98.3, 98.6, confirm=True)
+    except Aborted:
+        raise
+    except Exception as exc:  # incl. the review model's quota: never hold a finished order back
+        report["review_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        return
+    if not found:
+        return
+    job.progress(f"重做 {len(found)} 页", 98.6)
+    for i in found:
+        (job.workdir / "cache" / f"{i + 1:04d}.json").unlink(missing_ok=True)
+    redo = sorted(found)
+    _translate_all(job, client, upright, ocr, tess, redo, 98.6, 98.8, feedback=found)
+    _render(job, upright, ocr, tess, total, sorted({i // CHUNK for i in redo}), 98.8, 99, mono=True)
+    try:
+        problems = _quality_check(job, client, upright, ocr, tess, redo, 99, 99.2, confirm=True)
+    except Aborted:
+        raise
+    except Exception as exc:
+        report["review_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        problems = {}
+    report["redone"] = len(found)
+    report["problems"] = [{"page": i + 1, "issues": problems[i]} for i in sorted(problems)]
 
 
 def cleanup(workdir: Path):
