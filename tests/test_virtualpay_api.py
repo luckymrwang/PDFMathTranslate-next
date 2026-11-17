@@ -92,7 +92,7 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 422)
 
     @staticmethod
-    def _scan_pdf(pages: int, ocr_text: str = "") -> bytes:
+    def _scan_pdf(pages: int, ocr_text: str = "", **text_style) -> bytes:
         pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 80), False)
         pixmap.clear_with(240)
         image = pixmap.tobytes("png")
@@ -101,7 +101,7 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
                 page = document.new_page()
                 page.insert_image(page.rect, stream=image)
                 if ocr_text:
-                    page.insert_text((72, 100), ocr_text)
+                    page.insert_text((72, 100), ocr_text, **text_style)
             return document.tobytes()
 
     async def test_image_only_scan_is_flagged_but_accepted(self):
@@ -112,9 +112,23 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json(), {"page_count": 30, "scanned": True})
 
+    async def test_scan_with_a_transparent_tracking_code_is_still_flagged(self):
+        # Exam sites stamp each page with an invisible code; BabelDOC still rejects the scan.
+        code = "{#{QQABSQI1wgowgBaACQ5LEUHiCwqYkJKgLEoMwRAMOEwLyQFABIA=}#}"
+        result = await self.client.post(
+            "/v1/pdf/inspect",
+            files={"file": ("exam.pdf", self._scan_pdf(6, code, fill_opacity=0), "application/pdf")},
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.json()["scanned"])
+
     async def test_scan_with_text_layer_and_plain_pdf_are_not_flagged(self):
         text = "This page already has a searchable OCR text layer."
-        for name, content in (("ocr.pdf", self._scan_pdf(5, text)), ("plain.pdf", self.pdf)):
+        for name, content in (
+            ("ocr.pdf", self._scan_pdf(5, text)),
+            ("invisible-ocr.pdf", self._scan_pdf(5, text, render_mode=3)),
+            ("plain.pdf", self.pdf),
+        ):
             result = await self.client.post(
                 "/v1/pdf/inspect", files={"file": (name, content, "application/pdf")}
             )

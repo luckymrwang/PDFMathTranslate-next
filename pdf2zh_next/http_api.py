@@ -422,6 +422,9 @@ def _is_scanned_pdf(document: Any, sample_size: int = 20) -> bool:
 
     Such image-only PDFs have no text layer, so BabelDOC aborts them with
     "Scanned PDF detected"; a PDF with an OCR text layer has text and passes.
+    Fully transparent text is not counted: exam sites stamp every page with an
+    invisible tracking code, which BabelDOC (comparing the page with and without
+    its text) still sees as a scan. An OCR layer (render mode 3) counts as text.
     """
     import pymupdf
 
@@ -431,7 +434,7 @@ def _is_scanned_pdf(document: Any, sample_size: int = 20) -> bool:
     scanned = 0
     for index in sampled:
         page = document[index]
-        if len(page.get_text().strip()) >= 20:
+        if _visible_text_chars(page) >= 20:
             continue
         area = page.rect.width * page.rect.height
         covered = 0.0
@@ -441,6 +444,16 @@ def _is_scanned_pdf(document: Any, sample_size: int = 20) -> bool:
         if area > 0 and covered / area >= 0.6:
             scanned += 1
     return bool(sampled) and scanned / len(sampled) >= 0.8
+
+
+def _visible_text_chars(page: Any) -> int:
+    """Non-blank characters on the page, leaving out fully transparent text."""
+    count = 0
+    for span in page.get_texttrace():
+        if span.get("opacity", 1) <= 0:
+            continue
+        count += sum(1 for char in span.get("chars", ()) if not chr(char[0]).isspace())
+    return count
 
 
 # Mirrors babeldoc.format.pdf.high_level.check_metadata, which refuses its own output.
