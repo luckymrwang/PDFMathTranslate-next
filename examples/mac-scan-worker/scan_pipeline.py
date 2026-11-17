@@ -418,8 +418,28 @@ def _ask_model(job: Job, client, page: pymupdf.Page, image: str | None, payload,
     return result
 
 
+# The model endpoint cuts images into 32x32 px patches and rejects more than 30000
+# (a 1203x855 mm drawing at 144 dpi is 32528). Capping each image at ~4 MP keeps a
+# review's two images far below that; A4/A3 pages stay at full dpi. OCR still runs
+# on the full-resolution page, so only the model's view of tiny text gets softer.
+MAX_IMAGE_PIXELS = 4_000_000
+
+
+def _image_zoom(page: pymupdf.Page, dpi: float) -> float:
+    zoom = dpi / 72
+    pixels = page.rect.width * zoom * page.rect.height * zoom
+    if pixels > MAX_IMAGE_PIXELS:
+        zoom *= (MAX_IMAGE_PIXELS / pixels) ** 0.5 * 0.999  # stay under after rounding up
+    return zoom
+
+
 def _jpeg(page: pymupdf.Page, dpi: int = 144) -> str:
-    return base64.b64encode(page.get_pixmap(dpi=dpi).tobytes("jpeg", jpg_quality=85)).decode()
+    zoom = _image_zoom(page, dpi)
+    if zoom == dpi / 72:  # normal page: rendered exactly as before
+        pix = page.get_pixmap(dpi=dpi)
+    else:
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+    return base64.b64encode(pix.tobytes("jpeg", jpg_quality=85)).decode()
 
 
 def translate_page(job: Job, client, upright_path: Path, ocr_path: Path, index: int, tess: Path | None = None,

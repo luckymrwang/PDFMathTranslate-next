@@ -233,6 +233,26 @@ class ScanWorkerTest(unittest.TestCase):
         ok = {"groups": [{"ids": [0], "tr": "九十（90）日内"}, {"ids": [1], "tr": "这句话"}]}
         self.assertEqual(scan_pipeline.rule_issues(lines, ok, [{"ids": [0], "fs": 9, "scale": 1}]), [])
 
+    def test_large_pages_are_shrunk_below_the_model_patch_limit(self):
+        import base64
+        drawing_doc, a4_doc = scan_pipeline.pymupdf.open(), scan_pipeline.pymupdf.open()
+        drawing = drawing_doc.new_page(width=3410, height=2424)  # the 1203x855 mm sanyati drawing
+        a4 = a4_doc.new_page(width=595, height=842)
+
+        def size(page, dpi=144):
+            raw = base64.b64decode(scan_pipeline._jpeg(page, dpi))
+            pix = scan_pipeline.pymupdf.Pixmap(raw)
+            return pix.width, pix.height
+
+        w, h = size(drawing)
+        patches = -(-w // 32) * -(-h // 32)
+        self.assertLessEqual(w * h, scan_pipeline.MAX_IMAGE_PIXELS)
+        self.assertLess(2 * patches, 30000, "even a review's two images fit the endpoint")
+        self.assertAlmostEqual(w / h, 3410 / 2424, places=2, msg="aspect ratio kept")
+        self.assertEqual(size(a4), (1190, 1684), "A4 keeps the full 144 dpi")
+        self.assertEqual(size(a4, 110), (a4.get_pixmap(dpi=110).width, a4.get_pixmap(dpi=110).height),
+                         "uncapped pages render exactly as before")
+
     def test_rule_checks_find_unspaced_chinese_leftovers(self):
         # Without spaces a whole Chinese sentence is one "word": it used to pass unseen.
         R = scan_pipeline.pymupdf.Rect
