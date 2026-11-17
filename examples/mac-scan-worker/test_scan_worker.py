@@ -342,6 +342,25 @@ class ScanWorkerTest(unittest.TestCase):
         lines = scan_pipeline.ocr_lines(scan_pipeline.pymupdf.open(pdf)[0])
         self.assertEqual(scan_pipeline.rule_issues(lines, result, []), [])
 
+    def test_printed_names_are_romanized_across_scripts_in_every_prompt(self):
+        # A Chinese name left in an English page is untranslated, not "kept".
+        pdf = self._page_pdf(self.root / "name.pdf", ["Property owner", "Liu Chunhua"])
+        client, calls = self._model([{"groups": [{"ids": [0, 1], "tr": "x"}], "keep": []}])
+        job = self._job("names")
+        job.lang_in, job.lang_out = "zh", "en"
+        scan_pipeline.translate_page(job, client, pdf, pdf, 0)
+        system = calls[0]["system"]
+        self.assertIn("简体中文与英语使用同一种文字时保持原样", system)
+        self.assertIn("“刘春华”译为“Liu Chunhua”", system)
+        self.assertNotIn("logo、签名、人名等", system, "printed names are no longer kept wholesale")
+        langs = {"source": "简体中文", "target": "英语"}
+        rule = scan_pipeline.NAME_RULE.format(**langs)
+        self.assertIn(rule, scan_pipeline.TERMS_PROMPT.format(**langs), "glossary follows the same rule")
+        review = scan_pipeline.REVIEW_PROMPT.format(**langs)
+        self.assertIn(rule, review, "review checks names by the same rule")
+        self.assertNotIn("人名、签名、纯数字", review, "review no longer excuses every name")
+        self.assertNotIn("签名、人名", scan_pipeline.ORPHAN_PROMPT)
+
     def test_orphan_pass_sees_the_page(self):
         pdf = self._page_pdf(self.root / "orphan.pdf", ["First real sentence here", "Another real sentence here"])
         client, calls = self._model([{"groups": [{"ids": [0], "tr": "第一句"}], "keep": []},
