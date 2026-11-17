@@ -53,6 +53,8 @@ SYSTEM = """你是专业的文档译者。用户会发来一页扫描文档的�
 - 带文字的标题要翻译（如 “Section 14.1” 译为 “第14.1条”，“ARTICLE 14” 译为 “第14条”）。
 - 表格的不同行、不同单元格、不同卡片、不同项目符号条目一律分开，不要合并。
 - 每个 id 只能出现在一个组里；不需要翻译的行（纯数字、金额、百分比、日期数字、公式、代码、页码、签名、logo）不要输出。
+- 公式保持原样：整行都是公式或数学式（含 =、×、Σ、Π、上下标等）的不要输出，也不要改写成 LaTeX。如果 OCR 把图上的公式和它旁边的标注读成了同一行（如 “Σ a_k ← Term (general term)”，公式和标注之间常有箭头），译文只写标注（“通项”），不要带公式和箭头。
+- 句子里出现的变量和简单表达式（如 “the sum from k = 1 to n of a_k”）是句子的一部分，照常写进译文（“从 k = 1 到 n 的 a_k 之和”），不要省略。
 - logo 一律保持原样：标志、徽章、印章里的文字，以及与标志排在一起构成标识的机构名、院系名、品牌名、口号（如校徽下方的校名、标志右侧的“学院名 + 校名”组合）都算 logo，不要输出。正文、标题、表格里提到的机构名照常翻译。
 
 翻译要求：
@@ -233,8 +235,51 @@ def _page_lines(page: pymupdf.Page) -> list[dict]:
         for line in block.get("lines", []):
             text = re.sub(r"\s+", " ", " ".join(s["text"] for s in line["spans"])).strip()
             if text and re.search(r"[^\W\d_]{2,}", text):
-                lines.append({"bbox": pymupdf.Rect(line["bbox"]), "text": text})
+                # OCR writes one span per word: keep their boxes to trim the cover later.
+                words = [(s["text"].strip(), pymupdf.Rect(s["bbox"])) for s in line["spans"] if s["text"].strip()]
+                lines.append({"bbox": pymupdf.Rect(line["bbox"]), "text": text, "words": words})
     return lines
+
+
+def _letters(token: str) -> int:
+    return len(re.findall(r"[^\W\d_]", token))
+
+
+def cover_box(line: dict, translation: str, typical: float) -> tuple[pymupdf.Rect, str]:
+    """The part of an OCR line the translation replaces, and its source text.
+
+    OCR often reads an icon or a formula into the same line as the label beside it
+    ("4 Lecture", "> ak - Term (general term)"). Covering the whole line erases the
+    icon or formula, so leading/trailing tokens are left on the page when they are
+    symbols, digits or icon glyphs the translation does not repeat. On a line much
+    taller than the page's text (a big formula sign next to a label) short letter
+    tokens such as variable names are left too, if a symbol sits among them.
+    """
+    words = line.get("words") or []
+    if len(words) < 2:
+        return line["bbox"], line["text"]
+    carried = re.sub(r"[\s_]", "", translation)
+    tall = line["bbox"].height >= 1.6 * typical
+
+    def symbol(token):  # no letters, and not carried into the translation
+        return _letters(token) == 0 and re.sub(r"\s", "", token) not in carried
+
+    def droppable(token):
+        return symbol(token) or (tall and 0 < _letters(token) < 3)
+
+    start, end = 0, len(words)
+    while start < end and droppable(words[start][0]):
+        start += 1
+    while end > start and droppable(words[end - 1][0]):
+        end -= 1
+    dropped = words[:start] + words[end:]
+    kept = words[start:end]
+    if not dropped or not any(re.search(r"[^\W\d_]{3,}", w) for w, _ in kept):
+        return line["bbox"], line["text"]
+    if any(_letters(w) for w, _ in dropped) and not any(symbol(w) for w, _ in dropped):
+        return line["bbox"], line["text"]  # only short words: an ordinary sentence ("I agree ...")
+    box = pymupdf.Rect(kept[0][1].x0, line["bbox"].y0, kept[-1][1].x1, line["bbox"].y1)
+    return box, " ".join(w for w, _ in kept)
 
 
 def _overlaps(a: pymupdf.Rect, b: pymupdf.Rect) -> bool:
@@ -431,14 +476,24 @@ def _colours(pix: pymupdf.Pixmap, rect: pymupdf.Rect):
         f = t / 20
         x, y = rect.x0 + f * rect.width, rect.y0 + f * rect.height
         ring += [px(x, rect.y0 - 2), px(x, rect.y1 + 2), px(rect.x0 - 2, y), px(rect.x1 + 2, y)]
-    # The most common colour, not the median: table borders would darken a median.
-    buckets = collections.defaultdict(list)
-    for c in ring:
-        buckets[tuple(v // 24 for v in c)].append(c)
-    common = max(buckets.values(), key=len)
-    bg = tuple(statistics.median(c[i] for c in common) for i in range(3))
     inside = [px(rect.x0 + (i + .5) * rect.width / 40, rect.y0 + (j + .5) * rect.height / 8)
               for i in range(40) for j in range(8)]
+
+    def dominant(samples):
+        # The most common colour, not the median: table borders would darken a median.
+        buckets = collections.defaultdict(list)
+        for c in samples:
+            buckets[tuple(v // 24 for v in c)].append(c)
+        common = max(buckets.values(), key=len)
+        return tuple(statistics.median(c[i] for c in common) for i in range(3)), len(common) / len(samples)
+
+    # Text strokes cover a minority of a line's box, so the colour filling most of it is
+    # the background the text sits on, e.g. a coloured badge or button whose surroundings
+    # (what the ring sees) are white. On busy or graded backgrounds no colour dominates
+    # the inside and the surrounding ring decides.
+    bg, share = dominant(inside)
+    if share < 0.5:
+        bg, _ = dominant(ring)
     dist = lambda c: sum((c[i] - bg[i]) ** 2 for i in range(3))  # noqa: E731
     far = sorted(inside, key=dist)[-max(8, len(inside) // 10):]
     fg = tuple(statistics.median(c[i] for c in far) for i in range(3))
@@ -466,18 +521,23 @@ def render_translation(doc: pymupdf.Document, index: int, lines, result, archive
         if not ids or not text:
             continue
         used.update(ids)
-        rect = pymupdf.Rect(lines[ids[0]]["bbox"])
-        for i in ids[1:]:
-            rect |= lines[i]["bbox"]
+        cover = [cover_box(lines[i], text, typical) for i in ids]
+        rect = pymupdf.Rect(cover[0][0])
+        for box, _ in cover[1:]:
+            rect |= box
         est = []
-        for i in ids:
-            box, src = lines[i]["bbox"], lines[i]["text"]
+        for i, (box, src) in zip(ids, cover, strict=True):
             by_height = 1.1 * box.height
             by_width = 1.15 * box.width / (0.5 * len(src)) if len(src) >= 6 else by_height
+            if box != lines[i]["bbox"] and box.height >= 1.6 * typical:
+                est.append(min(by_height, by_width))  # a label beside a tall formula sign
             # single lines (headings, table cells): OCR height varies, keep at least body size
-            est.append(max(0.95 * by_height, 1.05 * typical) if len(ids) == 1 else min(by_height, by_width))
+            elif len(ids) == 1:
+                est.append(max(0.95 * by_height, 1.05 * typical))
+            else:
+                est.append(min(by_height, by_width))
         jobs.append((rect, statistics.median(lines[i]["bbox"].height for i in ids),
-                     statistics.median(est), text, [lines[i]["bbox"] for i in ids]))
+                     statistics.median(est), text, [box for box, _ in cover]))
         info_ids.append(ids)
     if jobs:
         body = [j[2] for j in jobs if j[1] < 1.5 * typical]

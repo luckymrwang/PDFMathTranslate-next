@@ -370,6 +370,49 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertFalse(old.exists())
         self.assertTrue(fresh.exists() and shared.exists(), "the shared cache itself must survive pruning")
 
+    def _line(self, words, y0=100, y1=112):
+        rect = scan_pipeline.pymupdf.Rect
+        boxes = [(t, rect(x0, y0, x1, y1)) for t, x0, x1 in words]
+        bbox = rect(boxes[0][1].x0, y0, boxes[-1][1].x1, y1)
+        return {"bbox": bbox, "text": " ".join(t for t, _ in boxes), "words": boxes}
+
+    def test_icons_beside_a_label_are_not_covered(self):
+        line = self._line([("4", 540, 552), ("Lecture", 557, 597)])
+        box, src = scan_pipeline.cover_box(line, "讲座", typical=12)
+        self.assertEqual((box.x0, src), (557, "Lecture"))
+        # a number the translation repeats is part of the text and gets covered
+        line = self._line([("2023", 100, 130), ("Annual", 134, 170), ("Report", 174, 210)])
+        self.assertEqual(scan_pipeline.cover_box(line, "2023年度报告", typical=12)[0].x0, 100)
+
+    def test_formula_beside_a_label_is_not_covered(self):
+        line = self._line([(">", 192, 214), ("ak", 218, 245), ("-", 249, 266), ("Term", 270, 305),
+                           ("(general", 309, 357), ("term)", 361, 398)], y0=166, y1=196)
+        box, src = scan_pipeline.cover_box(line, "项（通项）", typical=12)
+        self.assertEqual((box.x0, src), (270, "Term (general term)"))
+
+    def test_ordinary_sentences_are_covered_whole(self):
+        for words, tr in (([("I", 100, 104), ("agree", 108, 140), ("today", 144, 180)], "我今天同意"),
+                          ([("A", 100, 108), ("function", 112, 160), ("maps", 164, 190)], "函数映射")):
+            line = self._line(words, y0=100, y1=130)  # tall heading: still no symbol, keep it whole
+            self.assertEqual(scan_pipeline.cover_box(line, tr, typical=12)[0], line["bbox"])
+
+    def test_badge_cover_takes_the_badge_colour(self):
+        doc = scan_pipeline.pymupdf.open()
+        page = doc.new_page(width=200, height=100)
+        badge = scan_pipeline.pymupdf.Rect(50, 40, 120, 56)  # blue button on a white page
+        page.draw_rect(badge, color=None, fill=(0.2, 0.4, 0.8))
+        page.insert_text((60, 52), "Lecture", fontsize=10, color=(1, 1, 1))
+        pix = page.get_pixmap(dpi=scan_pipeline.DPI)
+        bg, fg = scan_pipeline._colours(pix, scan_pipeline.pymupdf.Rect(58, 43, 100, 54))
+        self.assertLess(bg[0], 0.4, f"cover must be the badge blue, got {bg}")
+        self.assertGreater(min(fg), 0.8, f"text must stay white, got {fg}")
+        plain = doc.new_page(width=200, height=100)
+        plain.insert_text((60, 52), "Lecture", fontsize=10)
+        bg, fg = scan_pipeline._colours(plain.get_pixmap(dpi=scan_pipeline.DPI),
+                                        scan_pipeline.pymupdf.Rect(58, 43, 100, 54))
+        self.assertGreater(min(bg), 0.9)
+        self.assertLess(max(fg), 0.3)
+
     def test_pause_seconds_reads_reset_time(self):
         later = (datetime.datetime.now() + datetime.timedelta(minutes=30)).strftime("%H:%M")
         seconds = scan_worker.pause_seconds(f"not asked again before {later} UTC+8")
