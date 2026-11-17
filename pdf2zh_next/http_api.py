@@ -101,6 +101,9 @@ class TranslateRequest(BaseModel):
     pool_max_workers: int | None = Field(default=DEFAULT_POOL_MAX_WORKERS)
     skip_image_translation: bool = Field(default=True)
     translate_table_text: bool = Field(default=False)
+    # Paragraphs shorter than this are left untranslated. None picks a value from
+    # lang_in, see _default_min_text_length.
+    min_text_length: int | None = Field(default=None, ge=0)
     watermark_output_mode: Literal["watermarked", "no_watermark", "both"] = Field(
         default="no_watermark"
     )
@@ -174,6 +177,20 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 # --- settings construction -----------------------------------------------------
 
+# BabelDOC skips paragraphs under 5 characters. That suits Latin scripts, where
+# such fragments are mostly abbreviations a translator gets wrong out of context
+# ("No." -> "不。"), but 2-4 Chinese, Japanese or Korean characters are whole
+# words: invoice and form tables (居民, 项目名称, 数 量) stayed untranslated.
+# One character stays skipped: vertical labels are split into single characters.
+CJK_MIN_TEXT_LENGTH = 2
+DEFAULT_MIN_TEXT_LENGTH = 5
+_CJK_LANGS = ("zh", "ja", "ko")
+
+
+def _default_min_text_length(lang_in: str) -> int:
+    base = (lang_in or "").strip().lower().replace("_", "-").split("-")[0]
+    return CJK_MIN_TEXT_LENGTH if base in _CJK_LANGS else DEFAULT_MIN_TEXT_LENGTH
+
 
 def _build_settings(req: TranslateRequest, output_dir: Path) -> SettingsModel:
     settings = SettingsModel(
@@ -181,6 +198,11 @@ def _build_settings(req: TranslateRequest, output_dir: Path) -> SettingsModel:
     )
     settings.translation.lang_in = req.lang_in
     settings.translation.lang_out = req.lang_out
+    settings.translation.min_text_length = (
+        req.min_text_length
+        if req.min_text_length is not None
+        else _default_min_text_length(req.lang_in)
+    )
     settings.translation.qps = req.qps
     settings.translation.pool_max_workers = req.pool_max_workers
     settings.translation.output = str(output_dir)
