@@ -233,6 +233,23 @@ class ScanWorkerTest(unittest.TestCase):
         ok = {"groups": [{"ids": [0], "tr": "九十（90）日内"}, {"ids": [1], "tr": "这句话"}]}
         self.assertEqual(scan_pipeline.rule_issues(lines, ok, [{"ids": [0], "fs": 9, "scale": 1}]), [])
 
+    def test_rule_checks_find_unspaced_chinese_leftovers(self):
+        # Without spaces a whole Chinese sentence is one "word": it used to pass unseen.
+        R = scan_pipeline.pymupdf.Rect
+        lines = [{"bbox": R(0, 0, 100, 10), "text": "本合同自签订之日起生效"},
+                 {"bbox": R(0, 20, 100, 30), "text": "层 数"},
+                 {"bbox": R(0, 40, 100, 50), "text": "刘春华"},
+                 {"bbox": R(0, 60, 100, 70), "text": "0120050269号"}]
+        none = {"groups": []}
+        issues = scan_pipeline.rule_issues(lines, none, [], "zh")
+        self.assertEqual(len(issues), 1)
+        self.assertTrue(issues[0].startswith(scan_pipeline.LEFTOVER))
+        self.assertIn("本合同自签订之日起生效", issues[0])
+        for short in ("层 数", "刘春华", "0120050269号"):
+            self.assertNotIn(short, issues[0], "labels, names and numbers under 4 characters are not prose")
+        self.assertEqual(scan_pipeline.rule_issues(lines, none, [], "en"), [],
+                         "Chinese already in an English source is not leftover source text")
+
     def test_review_counts_only_serious_issues(self):
         answers = [{"ok": True, "issues": [{"severity": "轻微", "desc": "表格线断点"}]},
                    {"ok": False, "issues": [{"severity": "严重", "desc": "抄送两行文字重叠"},
@@ -428,23 +445,30 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertEqual(seen, {"render": [], "check": [], "translate": []})
         self.assertEqual(job.report, {}, "no report, so the gateway sends the usual alert")
 
-    def test_light_check_reviews_only_flagged_pages_and_skips_redo_the_review_rejects(self):
-        job, seen = self._light_run({1: ["译文过挤或字号过小（5.2pt）：x"]}, [{}])
+    def test_light_check_ignores_cramped_text(self):
+        # zh->en pages are nearly always shrunk to fit; a redo cannot fix that.
+        job, seen = self._light_run({0: ["译文过挤或字号过小（9.8pt）：债权转让协议"],
+                                     1: ["译文过挤或字号过小（5.2pt）：x"]}, [])
+        self.assertEqual(seen, {"render": [], "check": [], "translate": []})
+        self.assertEqual(job.report, {}, "cramped text alone costs nothing and raises no alert")
+
+    def test_light_check_reviews_only_leftover_pages_and_skips_redo_the_review_rejects(self):
+        job, seen = self._light_run({1: ["残留原文：本合同自签订之日起生效"]}, [{}])
         self.assertEqual(seen["check"], [([1], True)], "only the flagged page, review must confirm")
         self.assertEqual(seen["render"], [([0], True, False)], "mono for the review, dual untouched")
-        self.assertEqual(seen["translate"], [], "tight text alone is not translated again")
+        self.assertEqual(seen["translate"], [], "unconfirmed leftovers are not translated again")
         self.assertEqual((job.report["checked"], job.report["redone"], job.report["problems"]), (1, 0, []))
 
     def test_light_check_redoes_confirmed_pages_with_the_findings(self):
         found = {2: ["残留原文：本合同自签订之日起生效"]}
-        job, seen = self._light_run({0: ["译文过挤"], 2: ["残留原文"]}, [dict(found), {}])
-        self.assertEqual(seen["check"], [([0, 2], True), ([2], True)], "redone page is checked again")
+        job, seen = self._light_run({0: ["译文过挤"], 2: ["残留原文：本合同自签订之日起生效"]}, [dict(found), {}])
+        self.assertEqual(seen["check"], [([2], True), ([2], True)], "cramped page 0 is not reviewed")
         self.assertEqual(seen["translate"], [([2], found)])
         self.assertEqual(seen["render"][-1], ([0], True, True), "redo renders the delivered pages too")
-        self.assertEqual((job.report["redone"], job.report["problems"]), (1, []))
+        self.assertEqual((job.report["checked"], job.report["redone"], job.report["problems"]), (1, 1, []))
 
     def test_light_check_failure_delivers_the_first_translation(self):
-        job, seen = self._light_run({0: ["残留原文"]}, [], error=scan_pipeline.QuotaExhausted("usage limit"))
+        job, seen = self._light_run({0: ["残留原文：x"]}, [], error=scan_pipeline.QuotaExhausted("usage limit"))
         self.assertEqual(seen["translate"], [])
         self.assertIn("QuotaExhausted", job.report["review_error"])
         self.assertIn("复核未完成，按首轮译文交付", scan_pipeline.format_report(job.report))

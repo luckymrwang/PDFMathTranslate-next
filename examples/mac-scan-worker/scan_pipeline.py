@@ -660,7 +660,20 @@ def extract_terms(job: Job, client, ocr: Path, tess: Path | None) -> int:
     return len(terms)
 
 
-def rule_issues(lines: list[dict], result: dict, info: list[dict]) -> list[str]:
+LEFTOVER = "残留原文："  # rule finding that triggers the light check's review
+CJK_SOURCES = {"zh", "ja", "ko"}
+# Han, kana and hangul: these scripts write words without spaces.
+_CJK = re.compile(r"[぀-ヿ㐀-鿿가-힯]")
+
+
+def _looks_like_prose(text: str, lang_in: str) -> bool:
+    """A line that is real untranslated source text, not a code, number or label."""
+    if lang_in in CJK_SOURCES:  # one unspaced sentence is a single "word"; count characters
+        return len(_CJK.findall(text)) >= 4
+    return len(re.findall(r"[^\W\d_]{3,}", text)) >= 3
+
+
+def rule_issues(lines: list[dict], result: dict, info: list[dict], lang_in: str = "") -> list[str]:
     """Cheap checks: leftover source sentences and squeezed text.
 
     Numbers are left to the vision review: OCR misreads digits the model corrects
@@ -669,10 +682,10 @@ def rule_issues(lines: list[dict], result: dict, info: list[dict]) -> list[str]:
     issues = []
     taken = {i for g in result.get("groups", []) for i in g.get("ids", [])} | set(result.get("keep") or [])
     left = [lines[i]["text"] for i in range(len(lines)) if i not in taken
-            and len(re.findall(r"[^\W\d_]{3,}", lines[i]["text"])) >= 3
+            and _looks_like_prose(lines[i]["text"], lang_in)
             and not re.search(r"www\.|https?:|@|\.(com|org|net|gov)\b", lines[i]["text"], re.I)]
     if left:
-        issues.append("残留原文：" + "；".join(t[:40] for t in left[:3]))
+        issues.append(LEFTOVER + "；".join(t[:40] for t in left[:3]))
     for item in info:
         if item["fs"] < 5.5 or item["scale"] < 0.7:
             text = " ".join(lines[i]["text"] for i in item["ids"] if 0 <= i < len(lines))
@@ -745,7 +758,7 @@ def _rule_hits(job: Job, ocr, tess, pages) -> dict[int, list[str]]:
         lines = ocr_lines(ocr_doc[i], _backup_page(tess, i))
         result = json.loads((cache / f"{i + 1:04d}.json").read_text())
         info = json.loads((cache / f"{i + 1:04d}.render.json").read_text())
-        issues = rule_issues(lines, result, info)
+        issues = rule_issues(lines, result, info, job.lang_in)
         if issues:
             hits[i] = issues
     return hits
@@ -764,7 +777,7 @@ def _quality_check(job: Job, client, upright, ocr, tess, pages, lo, hi, confirm:
         lines = ocr_lines(ocr_doc[i], _backup_page(tess, i))
         result = json.loads((cache / f"{i + 1:04d}.json").read_text())
         info = json.loads((cache / f"{i + 1:04d}.render.json").read_text())
-        issues = rule_issues(lines, result, info)
+        issues = rule_issues(lines, result, info, job.lang_in)
         with pymupdf.open(job.workdir / f"mono_{i // CHUNK:04d}.pdf") as mono:
             serious = review_page(job, client, orig[i], mono[i % CHUNK])
         if confirm and not serious:
@@ -858,12 +871,16 @@ def process(job: Job, client) -> dict:
 def _light_quality_check(job: Job, client, upright, ocr, tess, total):
     """Quality control priced for every order: rules first, the model only where they hit.
 
-    Pages the free rule checks flag get a vision review; pages the review confirms are
-    translated again once with its findings and checked again. The review is optional:
-    if it cannot run, the first translation is delivered. job.report stays empty when
-    the rules find nothing.
+    Only leftover source text triggers a review. Cramped text does not: zh->en pages
+    are almost always shrunk to fit, and a retranslation cannot make English fit a
+    Chinese-sized box (sampled 2026-11-17: 9 of 10 zh->en pages flagged, the redo
+    cleared 1 of 4). Pages with leftovers get a vision review; pages the review
+    confirms are translated again once with its findings and checked again. The
+    review is optional: if it cannot run, the first translation is delivered.
+    job.report stays empty when no page has leftovers.
     """
-    hits = _rule_hits(job, ocr, tess, range(total))
+    hits = {i: issues for i, issues in _rule_hits(job, ocr, tess, range(total)).items()
+            if any(issue.startswith(LEFTOVER) for issue in issues)}
     if not hits:
         return
     flagged = sorted(hits)
