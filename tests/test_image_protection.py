@@ -1,12 +1,4 @@
-from types import SimpleNamespace
-
-from babeldoc.docvision.base_doclayout import YoloResult
-from babeldoc.format.pdf.document_il import Box
-from babeldoc.format.pdf.document_il.utils.layout_helper import (
-    build_layout_index,
-    get_character_layout,
-    is_text_layout,
-)
+from babeldoc.docvision.base_doclayout import YoloBox, YoloResult
 
 from pdf2zh_next.http_api import TranslateRequest, _build_settings
 from pdf2zh_next.layout_protection import FigurePreservingLayoutModel
@@ -19,7 +11,7 @@ def test_api_defaults_to_preserving_images(tmp_path):
     assert settings.pdf.auto_enable_ocr_workaround is False
 
 
-def test_figure_characters_stay_protected_even_with_fallback_text():
+def test_figure_labels_become_protected_without_mutating_the_detector():
     names = {0: "figure_text", 1: "figure_caption", 2: "table_text"}
     result = YoloResult(names=names, boxes=[])
 
@@ -32,22 +24,99 @@ def test_figure_characters_stay_protected_even_with_fallback_text():
     model = FigurePreservingLayoutModel(FakeDetector())
     _, protected = next(model.handle_document())
     assert names[0] == "figure_text"  # No shared detector mutation.
+    assert protected.names[0] == "isolate_formula"
     assert protected.names[1] == "figure_caption"
     assert protected.names[2] == "table_text"
-    layouts = [
-        SimpleNamespace(id=1, class_name=protected.names[0], box=Box(0, 0, 100, 100)),
-        SimpleNamespace(id=2, class_name="fallback_line", box=Box(10, 10, 40, 20)),
-    ]
-    index, mapping = build_layout_index(SimpleNamespace(page_layout=layouts))
-    char = SimpleNamespace(visual_bbox=SimpleNamespace(box=Box(12, 12, 18, 18)))
-    selected = get_character_layout(char, index, mapping)
-    assert selected.name == "isolate_formula"
-    assert not is_text_layout(selected)
+
+
+BODY = "This paragraph is ordinary body text outside the figure."
+FIGURE = "Axis label printed inside the chart area."
+
+
+def _sent_to_translator(tmp_path, protect):
+    """Run BabelDOC on one page whose lower text sits in a detected figure.
+
+    BabelDOC 0.7 assigns characters to layout regions in Rust, so the only way
+    to check protection is a real run with a translator that records its input.
+    """
+    import numpy as np
+    import pymupdf
+    from babeldoc.format.pdf.high_level import translate
+    from babeldoc.format.pdf.translation_config import (
+        TranslationConfig,
+        WatermarkOutputMode,
+    )
+    from babeldoc.translator.translator import BaseTranslator
+
+    pdf = tmp_path / "figure.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((60, 110), BODY, fontname="helv", fontsize=12)
+    page.draw_rect(pymupdf.Rect(50, 280, 545, 420), color=(0, 0, 0))
+    page.insert_text((70, 350), FIGURE, fontname="helv", fontsize=12)
+    doc.save(pdf)
+
+    class Detector:
+        stride = 32
+
+        def handle_document(self, pages, *args, **kwargs):
+            for page in pages:
+                # Boxes are numpy values in PDF points, origin top-left, like the
+                # real model's (BabelDOC calls .item() on them).
+                yield page, YoloResult(
+                    names={0: "plain text", 1: "figure"},
+                    boxes=[
+                        YoloBox(xyxy=np.array(xyxy, dtype=np.float32), conf=np.float32(0.9), cls=np.float32(cls))
+                        for xyxy, cls in (((50, 90, 545, 125), 0), ((50, 280, 545, 420), 1))
+                    ],
+                )
+
+    sent = []
+
+    class Recorder(BaseTranslator):
+        name = "recorder"
+
+        def do_translate(self, text, rate_limit_params=None):
+            sent.append(text)
+            return "译" + text
+
+        def do_llm_translate(self, text, rate_limit_params=None):
+            raise NotImplementedError
+
+    layout = FigurePreservingLayoutModel(Detector()) if protect else Detector()
+    translate(
+        TranslationConfig(
+            input_file=str(pdf),
+            font=None,
+            translator=Recorder("en", "zh", True),
+            lang_in="en",
+            lang_out="zh",
+            output_dir=str(tmp_path / "out"),
+            working_dir=str(tmp_path / "work"),
+            doc_layout_model=layout,
+            no_dual=True,
+            skip_scanned_detection=True,
+            auto_extract_glossary=False,
+            watermark_output_mode=WatermarkOutputMode.NoWatermark,
+        )
+    )
+    return " ".join(sent)
+
+
+def test_text_inside_a_detected_figure_is_not_translated(tmp_path):
+    sent = _sent_to_translator(tmp_path, protect=True)
+    assert "ordinary body text" in sent
+    assert "inside the chart" not in sent
+
+
+def test_figure_text_is_translated_without_protection(tmp_path):
+    # Control: proves the wrapper, not BabelDOC itself, keeps figure text.
+    sent = _sent_to_translator(tmp_path, protect=False)
+    assert "ordinary body text" in sent
+    assert "inside the chart" in sent
 
 
 def _protected_boxes(names, boxes):
-    from babeldoc.docvision.base_doclayout import YoloBox
-
     class Detector:
         stride = 32
 
