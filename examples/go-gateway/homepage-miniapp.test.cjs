@@ -65,6 +65,21 @@ async function run() {
   assert.equal(cache['dev:invite_ref'], 'INVITE23', 'The first invite code is kept')
   await home.onPrimaryAction()
   assert.equal(created.length, 0, 'Empty homepage cannot create a trial')
+
+  // Choosing a file must never fail silently (store review: "tapping does nothing").
+  const modals = []
+  sandbox.wx.showModal = options => modals.push(options)
+  sandbox.wx.chooseMessageFile = options => options.fail({ errMsg: 'chooseMessageFile:fail cancel' })
+  home.chooseFile()
+  assert.equal(modals.length, 0, 'Cancelling the picker is not an error')
+  sandbox.wx.chooseMessageFile = options => options.fail({ errMsg: 'chooseMessageFile:fail privacy permission is not authorized' })
+  home.chooseFile()
+  assert.equal(modals.length, 1, 'A failed picker explains what to do')
+  assert.match(modals[0].content, /文件传输助手/)
+  assert.match(modals[0].content, /privacy permission/, 'The WeChat error is shown for diagnosis')
+  sandbox.wx.chooseMessageFile = options => options.success({ tempFiles: [] })
+  home.chooseFile()
+  assert.equal(modals.length, 1, 'An empty selection is a toast, not a dialog')
   Object.assign(home.data, { filePath: 'file.pdf', fileName: 'file.pdf', filePreparation: 'ready', engine: 'GPT-6', mode: 'enhanced' })
   home.preparedFile = { path: 'file.pdf', file_token: 'prepared-token', page_count: 12, expires_at: Date.now() / 1000 + 1800 }
   await home.getPaymentConfig()
