@@ -194,6 +194,9 @@ type PayOrder struct {
 	Trial bool
 	// Output is the requested result format ("dual", "mono" or "both"); empty means dual.
 	Output string
+	// TranslateFigures translates the text inside detected charts and diagrams;
+	// false (the default) keeps them as they are (skip_image_translation).
+	TranslateFigures bool
 	// Scanned marks an image-only PDF. It is still sold; if automatic translation
 	// fails, an operator finishes it manually instead of refunding by default.
 	Scanned bool

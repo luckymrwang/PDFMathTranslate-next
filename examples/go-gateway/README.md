@@ -77,6 +77,7 @@ go run .
 本地模型配置已保存在 Git 忽略的 `.env` 中。设置好微信登录所需环境变量后，用 `./start.sh` 启动即可加载该文件；直接 `go run .` 不会自动加载 `.env`。不要提交或分享 `.env`。
 
 小程序标准翻译默认选择 Bing。翻译 API 默认 `skip_image_translation: true`：识别到的图片及图内文字保持原样，关闭图片 OCR，图外正文和图注继续翻译。该保护依赖版面识别，未识别成图片的区域仍可能按正文处理。
+下单接口（`/pay/order/prepared`、`/pay/order`）可传 `translate_figures: true`（小程序首页「翻译图表里的文字」开关，默认关闭），订单据此发送 `skip_image_translation: false`，图表、流程图里可选中的文字一并翻译；截图、照片里的像素文字不做 OCR，仍保持原样。订单视图返回同名字段。
 
 ## 接口
 

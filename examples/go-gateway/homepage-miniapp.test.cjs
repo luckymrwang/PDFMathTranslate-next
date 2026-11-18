@@ -213,6 +213,7 @@ async function run() {
   assert.equal(paid.upgrade_from, 'trial-1')
   assert.equal(paid.engine, 'DeepSeek-V4.1-Flash')
   assert.equal(paid.output, 'dual', 'Orders default to the dual PDF')
+  assert.equal(paid.translate_figures, undefined, 'Chart text stays untranslated unless switched on')
   const cancelledCreations = created.length
   await home.confirmTranslation()
   assert.equal(created.length, cancelledCreations + 1, 'Cancelled payment retries create a fresh order')
@@ -286,6 +287,18 @@ async function run() {
   assert.ok(Object.values(cache).includes('both'), 'Output choice is remembered')
   home.selectOutput({ currentTarget: { dataset: { value: 'html' } } })
   assert.equal(home.data.output, 'dual')
+  // Chart text: off by default, explained by a dialog that can switch it on, never for scans.
+  assert.equal(home.data.translateFigures, false)
+  home.toggleFigures()
+  assert.equal(home.makeJob().translateFigures, true)
+  home.toggleFigures()
+  home.showFigureInfo()
+  assert.equal(home.data.figureInfo, true)
+  home.enableFigures()
+  assert.equal(home.data.figureInfo + ':' + home.data.translateFigures, 'false:true', 'The dialog can switch it on')
+  home.setData({ fileScanned: true })
+  assert.equal(home.makeJob().translateFigures, false, 'Scans never ask for chart text')
+  home.setData({ fileScanned: false })
   // Fully covered by referral pages: no WeChat payment, straight to progress.
   freeOrders = true
   const before = navigated
@@ -297,6 +310,9 @@ async function run() {
   await home.confirmTranslation()
   assert.equal(navigated, before + 1, 'Free order opens the progress page')
   assert.equal(app.globalData.translation.orderID, 'free-1')
+  assert.equal(created[created.length - 1].data.translate_figures, true, 'The order carries the chart-text choice')
+  home.removeFile()
+  assert.equal(home.data.translateFigures, false, 'A new file starts with the switch off')
   // Lazy login carries the environment-scoped invitation on the first request.
   let loginBody
   const apiModule = { exports: {} }

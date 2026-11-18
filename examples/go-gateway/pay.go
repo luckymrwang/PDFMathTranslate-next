@@ -45,7 +45,7 @@ func orderView(order PayOrder) map[string]any {
 		"unit_price_fen": order.UnitPrice, "total_fen": order.Total,
 		"engine": order.Engine, "name": order.Name, "lang_in": order.LangIn, "lang_out": order.LangOut,
 		"task_id": order.TaskID, "delivery": order.Delivery, "created_at": order.CreatedAt, "trial": order.Trial,
-		"output": outputOrDefault(order.Output)}
+		"output": outputOrDefault(order.Output), "translate_figures": order.TranslateFigures}
 }
 
 // Result formats a client may ask for. Translation runs once either way; "both"
@@ -237,6 +237,8 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		Platform string `json:"platform"`
 		Trial    bool   `json:"trial"`
 		Output   string `json:"output"`
+		// TranslateFigures also translates text inside charts and diagrams.
+		TranslateFigures bool `json:"translate_figures"`
 	}
 	if json.Unmarshal([]byte(r.FormValue("data")), &data) != nil {
 		writeError(w, 400, "invalid settings")
@@ -310,7 +312,8 @@ func (s *Server) handlePayOrder(w http.ResponseWriter, r *http.Request) {
 		Pages: inspected.Pages, Engine: data.Engine,
 		LangIn: data.LangIn, LangOut: data.LangOut, FilePath: stagedPath,
 		FileHash: hex.EncodeToString(hash.Sum(nil)), Name: filepath.Base(header.Filename),
-		State: "pending", CreatedAt: time.Now().Unix(), Attach: id, Output: output, Scanned: inspected.Scanned}
+		State: "pending", CreatedAt: time.Now().Unix(), Attach: id, Output: output, Scanned: inspected.Scanned,
+		TranslateFigures: data.TranslateFigures}
 	free := s.scanDiscountFor(order.Engine, inspected.Pages)
 	if err := s.pay.store.addPurchase(&order, inspected.Pages, free, func(o *PayOrder, remaining int) error {
 		return s.pricePurchase(o, remaining, data.Platform, sessionKey)
@@ -660,7 +663,7 @@ func (s *Server) submitPaidOrder(ctx context.Context, order PayOrder) (string, e
 	ctx, cancel := context.WithTimeout(ctx, defaultSubmitTimeout)
 	defer cancel()
 	params := map[string]any{"lang_in": order.LangIn, "lang_out": order.LangOut, "qps": 4,
-		"skip_image_translation": true, "translate_engine_settings": settings}
+		"skip_image_translation": !order.TranslateFigures, "translate_engine_settings": settings}
 	outputParams(params, order.Output)
 	if order.Trial {
 		pages := order.PageCount()

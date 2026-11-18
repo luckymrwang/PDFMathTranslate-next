@@ -301,6 +301,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 		Ref string `json:"ref"`
 		// Output picks the result PDFs: "dual" (default), "mono" or "both".
 		Output string `json:"output"`
+		// TranslateFigures also translates text inside charts and diagrams.
+		TranslateFigures bool `json:"translate_figures"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input) != nil {
 		writeError(w, 400, "invalid settings")
@@ -369,7 +371,8 @@ func (s *Server) handlePreparedOrder(w http.ResponseWriter, r *http.Request) {
 	order := PayOrder{ID: id, OpenID: owner, Pages: file.Pages, Engine: input.Engine,
 		LangIn: input.LangIn, LangOut: input.LangOut, FilePath: file.Path, FileHash: file.Hash,
 		Name: file.Name, State: "pending", CreatedAt: time.Now().Unix(), Attach: id,
-		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, Output: output, Scanned: file.Scanned}
+		UpgradeFrom: input.UpgradeFrom, TrialCredit: credit, Output: output, Scanned: file.Scanned,
+		TranslateFigures: input.TranslateFigures}
 	free := s.scanDiscountFor(order.Engine, billed)
 	err = s.pay.store.addPurchase(&order, billed, free, func(o *PayOrder, remaining int) error { return s.pricePurchase(o, remaining, input.Platform, session) })
 	if err != nil {
