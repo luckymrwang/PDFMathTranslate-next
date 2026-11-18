@@ -183,9 +183,9 @@ def run_ocr(job: Job, src: Path, dest: Path, rotate: bool = False):
     part.replace(dest)
 
 
-def _image_page(out: pymupdf.Document, page: pymupdf.Page):
+def _image_page(out: pymupdf.Document, page: pymupdf.Page, dpi: int = BAKE_DPI):
     """Append page as a flat image with its /Rotate baked in."""
-    pix = page.get_pixmap(dpi=BAKE_DPI, alpha=False)
+    pix = page.get_pixmap(dpi=dpi, alpha=False)
     target = out.new_page(width=page.rect.width, height=page.rect.height)
     target.insert_image(target.rect, stream=pix.tobytes("jpeg", jpg_quality=88))
 
@@ -228,21 +228,53 @@ def _straighten(job: Job) -> tuple[Path, Path]:
     _check(job)
     ocr = pymupdf.open(ocr_path)
     turned = [i for i, page in enumerate(ocr) if page.rotation % 360]
+    if turned:
+        baked = pymupdf.open()
+        for i in turned:
+            _image_page(baked, ocr[i])
+        baked_path, baked_ocr = job.workdir / "turned.pdf", job.workdir / "turned-ocr.pdf"
+        baked.save(baked_path, garbage=3, deflate=True)
+        run_ocr(job, baked_path, baked_ocr)
+        fixed = pymupdf.open(baked_ocr)
+        for n, i in enumerate(turned):
+            ocr.delete_page(i)
+            ocr.insert_pdf(fixed, from_page=n, to_page=n, start_at=i)
+    # Pages OCR found nothing on (small screenshots on an otherwise empty page).
+    blank = [i for i, page in enumerate(ocr) if not page.get_text().strip() and page.get_images()]
+    if blank and _reocr_blank(job, ocr, blank):
+        turned = turned or [-1]
     if not turned:
         return ocr_path, ocr_path
-    baked = pymupdf.open()
-    for i in turned:
-        _image_page(baked, ocr[i])
-    baked_path, baked_ocr = job.workdir / "turned.pdf", job.workdir / "turned-ocr.pdf"
-    baked.save(baked_path, garbage=3, deflate=True)
-    run_ocr(job, baked_path, baked_ocr)
-    fixed = pymupdf.open(baked_ocr)
-    for n, i in enumerate(turned):
-        ocr.delete_page(i)
-        ocr.insert_pdf(fixed, from_page=n, to_page=n, start_at=i)
     upright = job.workdir / "ocr-upright.pdf"
     ocr.save(upright, garbage=3, deflate=True)
     return upright, upright
+
+
+def _reocr_blank(job: Job, ocr: pymupdf.Document, blank: list[int]) -> bool:
+    """Read pages Apple OCR returned no text for; True when text was found.
+
+    A page holding one small screenshot can come back empty, and rasterizing the
+    whole page again at the default DPI does not help: on such a page Apple OCR
+    reads 200 DPI but nothing at 300. So try a few lower DPIs in turn.
+    """
+    for dpi in (200, 150, 250, 120):
+        subset = pymupdf.open()
+        for i in blank:
+            _image_page(subset, ocr[i], dpi)
+        path, out = job.workdir / f"blank-{dpi}.pdf", job.workdir / f"blank-{dpi}-ocr.pdf"
+        subset.save(path, garbage=3, deflate=True)
+        try:
+            run_ocr(job, path, out)
+        except RuntimeError:
+            continue
+        fixed = pymupdf.open(out)
+        if not any(page.get_text().strip() for page in fixed):
+            continue
+        for n, i in enumerate(blank):
+            ocr.delete_page(i)
+            ocr.insert_pdf(fixed, from_page=n, to_page=n, start_at=i)
+        return True
+    return False
 
 
 # ---------------------------------------------------------------- translation
@@ -806,7 +838,9 @@ def extract_terms(job: Job, client, ocr: Path, tess: Path | None) -> int:
 LEFTOVER = "残留原文："  # rule finding that triggers the light check's review
 CJK_SOURCES = {"zh", "ja", "ko"}
 # Han, kana and hangul: these scripts write words without spaces.
+# autocorrect-disable  # a regex character range, not prose
 _CJK = re.compile(r"[぀-ヿ㐀-鿿가-힯]")
+# autocorrect-enable
 
 
 def _looks_like_prose(text: str, lang_in: str) -> bool:
