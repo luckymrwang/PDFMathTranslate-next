@@ -564,6 +564,51 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertGreater(min(bg), 0.9)
         self.assertLess(max(fg), 0.3)
 
+    @staticmethod
+    def _image_pdf(path, width_px, page_w, page_h, text=""):
+        pymupdf = scan_pipeline.pymupdf
+        height_px = round(width_px * page_h / page_w)
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width_px, height_px), False)
+        for y in range(0, height_px, 3):  # noisy rows, so lossless compression cannot shrink it
+            pix.set_rect(pymupdf.IRect(0, y, width_px, y + 1), ((y * 37) % 256, (y * 11) % 256, (y * 5) % 256))
+        with pymupdf.open() as doc:
+            page = doc.new_page(width=page_w, height=page_h)
+            page.insert_image(page.rect, stream=pix.tobytes("png"))
+            if text:
+                page.insert_text((20, 40), text, fontsize=12)
+            doc.save(path)
+
+    def _merged_image(self, source_px, ocr_px):
+        """Merge a 400-ish dpi OCR page for a source scanned at source_px across 4 in."""
+        source, part, dest = self.root / "source.pdf", self.root / "dual_0000.pdf", self.root / "result-dual.pdf"
+        self._image_pdf(source, source_px, 288, 162)
+        self._image_pdf(part, ocr_px, 288, 162, "translation")
+        scan_pipeline._merge([part], dest, scan_pipeline.source_dpi(source))
+        with scan_pipeline.pymupdf.open(dest) as out:
+            xref, width = out[0].get_images(full=True)[0][:3:2]
+            self.assertEqual(out.extract_image(xref)["ext"], "jpeg")
+            self.assertIn("translation", out[0].get_text())
+        self.assertLess(dest.stat().st_size, part.stat().st_size / 2)
+        return width
+
+    def test_delivered_pdf_shrinks_the_ocr_images_of_a_low_res_scan(self):
+        # A 71 dpi scan comes back from ocrmypdf as a lossless 400 dpi image per page.
+        self.assertEqual(self._merged_image(284, 1600), 800)  # 400 -> 200 dpi
+
+    def test_delivered_pdf_keeps_the_resolution_of_a_sharp_scan(self):
+        # A 300 dpi scan stays at 300 dpi; only the lossless image becomes a JPEG.
+        self.assertEqual(self._merged_image(1200, 1200), 1200)
+
+    def test_source_dpi_reads_the_sharpest_page_within_range(self):
+        path = self.root / "s.pdf"
+        for px, want in ((284, 150), (800, 200), (2400, 300)):  # 71, 200, 600 dpi
+            self._image_pdf(path, px, 288, 162)
+            self.assertEqual(scan_pipeline.source_dpi(path), want, px)
+        with scan_pipeline.pymupdf.open() as doc:  # vector pages: OCR rasterizes them sharp
+            doc.new_page().insert_text((72, 72), "text")
+            doc.save(path)
+        self.assertEqual(scan_pipeline.source_dpi(path), 300)
+
     def test_pause_seconds_reads_reset_time(self):
         later = (datetime.datetime.now() + datetime.timedelta(minutes=30)).strftime("%H:%M")
         seconds = scan_worker.pause_seconds(f"not asked again before {later} UTC+8")

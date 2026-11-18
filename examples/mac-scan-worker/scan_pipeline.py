@@ -626,11 +626,42 @@ def _render_chunk(task):
     return pages
 
 
-def _merge(parts: list[Path], dest: Path):
+# ocrmypdf --force-ocr rasterizes every page as a lossless image at up to 400 dpi, so a
+# 0.3 MB scan came back as a 30 MB result that took minutes to upload. OCR and review
+# keep the full images; only the delivered PDF is recompressed to JPEG, never below the
+# customer's own scan: the target is the source's resolution, kept within
+# RESULT_DPI_RANGE. MuPDF halves an image while it is at least twice the target, so a
+# 400 dpi page of a 71 dpi scan ends at 200 dpi and a 300 dpi scan stays at 300 dpi.
+# The translation is vector text, so this only touches the scanned background.
+RESULT_DPI_RANGE = (150, 300)
+RESULT_JPEG_QUALITY = 85
+
+
+def source_dpi(path: Path) -> int:
+    """Resolution of the sharpest scanned page in path, within RESULT_DPI_RANGE.
+
+    Only images covering at least a third of the page count; a document with none
+    (vector pages, which OCR rasterizes) gets the top of the range.
+    """
+    low, high = RESULT_DPI_RANGE
+    best = 0.0
+    with pymupdf.open(path) as doc:
+        for page in doc:
+            area = page.rect.width * page.rect.height
+            for info in page.get_image_info():
+                box = pymupdf.Rect(info["bbox"]) & page.rect
+                if area <= 0 or box.width * box.height < area / 3 or box.width <= 0:
+                    continue
+                best = max(best, info["width"] / (box.width / 72), info["height"] / (box.height / 72))
+    return int(min(max(best or high, low), high))
+
+
+def _merge(parts: list[Path], dest: Path, dpi: int = RESULT_DPI_RANGE[1]):
     out = pymupdf.open()
     for part in parts:
         with pymupdf.open(part) as doc:
             out.insert_pdf(doc)
+    out.rewrite_images(dpi_threshold=dpi + 1, dpi_target=dpi, quality=RESULT_JPEG_QUALITY)
     out.set_metadata({"producer": "pdfmath scan worker", "title": "translated"})
     out.save(dest, garbage=4, deflate=True)
 
@@ -880,10 +911,11 @@ def process(job: Job, client) -> dict:
         _light_quality_check(job, client, upright, ocr, tess, total)
 
     results = {}
+    dpi = source_dpi(job.source)
     for kind in ("dual", "mono"):
         if job.output in (kind, "both"):
             dest = job.workdir / f"result-{kind}.pdf"
-            _merge([job.workdir / f"{kind}_{n:04d}.pdf" for n in range(chunk_count)], dest)
+            _merge([job.workdir / f"{kind}_{n:04d}.pdf" for n in range(chunk_count)], dest, dpi)
             results[kind] = dest
     return results
 
