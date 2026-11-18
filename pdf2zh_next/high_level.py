@@ -60,6 +60,15 @@ class DocumentTooComplexError(BabeldocError):
     """
 
 
+class ScannedPDFDetectedError(BabeldocError):
+    """BabelDOC found no text it can translate; retrying cannot help.
+
+    Raised for its ScannedPDFError ("Scanned PDF detected.") and for
+    ExtractTextError ("The document contains no paragraphs."), which image-only
+    scans hit once the scan check lets them through.
+    """
+
+
 class SubprocessError(TranslationError):
     """Error occurring in the translation subprocess outside of babeldoc."""
 
@@ -182,11 +191,11 @@ def _translate_wrapper(
                         # Convert babeldoc error to structured exception
                         original = event.get("error", "Unknown babeldoc error")
                         error_msg = str(original)
-                        error_class = (
-                            DocumentTooComplexError
-                            if type(original).__name__ == "ParserResourceLimitError"
-                            else BabeldocError
-                        )
+                        error_class = {
+                            "ParserResourceLimitError": DocumentTooComplexError,
+                            "ScannedPDFError": ScannedPDFDetectedError,
+                            "ExtractTextError": ScannedPDFDetectedError,
+                        }.get(type(original).__name__, BabeldocError)
                         error = error_class(
                             message=f"Babeldoc translation error: {error_msg}",
                             original_error=error_msg,

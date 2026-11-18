@@ -67,6 +67,12 @@ const documentTooComplex = "document_too_complex"
 
 const msgDocumentTooComplex = "该 PDF 结构过于复杂，超出解析上限，无法翻译"
 
+// scannedPDF is the Python API's error_type when BabelDOC rejects a PDF as a scan
+// the quote did not flag. Text engines cannot read it, so it is never retried: the
+// order goes to the Mac scan worker when its engine can do OCR, and fails at once
+// (points refunded, user told to pick a GPT engine) otherwise.
+const scannedPDF = "scanned_pdf"
+
 // orderLocks serializes work per order so one slow submission never blocks other orders.
 type orderLocks struct {
 	mu sync.Mutex
@@ -145,6 +151,10 @@ func (s *Server) advancePaidOrder(ctx context.Context, id string, wait bool) err
 			s.deleteUpstreamTask(ctx, order.TaskID)
 			return s.failPaidOrder(id, errorType)
 		}
+		if errorType == scannedPDF {
+			s.deleteUpstreamTask(ctx, order.TaskID)
+			return s.rescueScannedOrder(ctx, id)
+		}
 	}
 	log.Printf("paid translation task lost or failed, retrying (order=%s, state=%s)", id, state)
 	s.deleteUpstreamTask(ctx, order.TaskID)
@@ -205,12 +215,61 @@ func (s *Server) failPaidOrder(id, reason string) error {
 	}
 	log.Printf("paid translation cannot succeed (%s); settlement recorded (order=%s)", reason, id)
 	order, _ := s.pay.store.get(id)
-	if pointsOnly(order) {
-		s.notify("积分订单无法翻译（无需处理）", orderSummary(order)+"\n原因："+reason+"\n积分会自动退回")
-	} else {
-		s.notify("付费订单无法翻译", orderSummary(order)+"\n原因："+reason)
+	why := "\n原因：" + failReasonText(reason)
+	switch {
+	case pointsOnly(order):
+		next := "\n积分会自动退回"
+		if note := scanReorderNote(order); note != "" {
+			next += "，用户已被提示" + note
+		}
+		s.notify("积分订单无法翻译（无需处理）", orderSummary(order)+why+next)
+	case order.Scanned:
+		s.notify("扫描件翻译失败，请在 Mac 上立即处理", orderSummary(order)+why+adoptHint(order))
+	default:
+		s.notify("付费订单无法翻译", orderSummary(order)+why)
 	}
 	return errPaidFailed
+}
+
+// failReasonText explains a FailReason code in operator alerts.
+func failReasonText(reason string) string {
+	switch reason {
+	case alreadyTranslated:
+		return msgAlreadyTranslated
+	case documentTooComplex:
+		return msgDocumentTooComplex
+	case scannedPDF:
+		return "翻译引擎判定为扫描件（页面是图片），文字引擎读不了"
+	}
+	return reason
+}
+
+// rescueScannedOrder handles a PDF BabelDOC rejected as a scan although the quote
+// did not flag it. Retrying cannot help, and the user has already paid, so the order
+// is marked a scan and goes to the Mac scan worker when its engine can do OCR;
+// otherwise it fails right away with the scan explanation and a points refund.
+// Callers hold the order lock.
+func (s *Server) rescueScannedOrder(ctx context.Context, id string) error {
+	err := s.pay.store.update(id, func(current *PayOrder) error {
+		if current.State == "refunded" {
+			return errors.New("order refunded")
+		}
+		current.Scanned = true
+		if current.TaskID != "" {
+			current.TaskHistory = append(current.TaskHistory, current.TaskID)
+		}
+		current.TaskID = ""
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if order, _ := s.pay.store.get(id); routeToScanWorker(order) {
+		log.Printf("translation engine rejected a scan; handing it to the scan worker (order=%s)", id)
+		_, err := s.startPaidOrderLocked(ctx, id)
+		return err
+	}
+	return s.failPaidOrder(id, scannedPDF)
 }
 
 // scanReorderNote completes a points-order alert for a scan on a text-only engine.

@@ -195,6 +195,69 @@ func TestDocumentTooComplexFailsWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestUnflaggedScanOnTextEngineFailsWithoutRetry(t *testing.T) {
+	alerts := newAlertSink(t)
+	s := testPayServer(t)
+	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			t.Error("a PDF rejected as a scan must not be resubmitted to a text engine")
+		}
+		writeJSON(w, 200, map[string]any{"state": "error", "error_type": scannedPDF})
+	}))
+	defer python.Close()
+	s.pdf2zh = NewPdf2zhClient(python.URL)
+	order := paidOrderFixture(t, s, "Tscan", "task-s", 0)
+	if err := s.pay.store.update(order.ID, func(o *PayOrder) error {
+		o.Engine, o.CreditPoints = "DeepSeek-V4.1-Flash", 60
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.advancePaidOrder(context.Background(), order.ID, true); err != errPaidFailed {
+		t.Fatalf("expected immediate failure, got %v", err)
+	}
+	failed, _ := s.pay.store.get(order.ID)
+	if failed.Delivery != "failed" || failed.FailReason != scannedPDF || !failed.Scanned || failed.Attempts != 0 {
+		t.Fatalf("not failed as a scan on the first attempt: %+v", failed)
+	}
+	if msg := paidFailureMessage(failed); msg != msgScanPointsFailed {
+		t.Fatalf("user is not told to reorder with a GPT engine: %q", msg)
+	}
+	alerts.wait(t, "积分订单无法翻译")
+}
+
+func TestUnflaggedScanOnGPTGoesToScanWorker(t *testing.T) {
+	t.Setenv("SCAN_WORKER_TOKEN", testScanToken)
+	s := testPayServer(t)
+	python := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			t.Error("a scan for the Mac worker must not be resubmitted to the Python API")
+		}
+		writeJSON(w, 200, map[string]any{"state": "error", "error_type": scannedPDF})
+	}))
+	defer python.Close()
+	s.pdf2zh = NewPdf2zhClient(python.URL)
+	order := paidOrderFixture(t, s, "Tscangpt", "task-g", 0)
+	if err := s.pay.store.update(order.ID, func(o *PayOrder) error {
+		o.Engine, o.Total = "GPT-5.6", 400
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.advancePaidOrder(context.Background(), order.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := s.pay.store.get(order.ID)
+	if !queued.Scanned || !queued.ScanWorker || queued.Delivery != "" || !strings.HasPrefix(queued.TaskID, scanTaskPrefix) {
+		t.Fatalf("scan not handed to the Mac worker: %+v", queued)
+	}
+	if len(queued.TaskHistory) != 1 || queued.TaskHistory[0] != "task-g" {
+		t.Fatalf("rejected Python task not kept in history: %v", queued.TaskHistory)
+	}
+}
+
 func TestCancelledOrderHiddenButLatePaymentRevives(t *testing.T) {
 	s := testPayServer(t)
 	var paid sync.Mutex

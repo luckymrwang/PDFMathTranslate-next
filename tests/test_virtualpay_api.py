@@ -92,48 +92,68 @@ class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 422)
 
     @staticmethod
-    def _scan_pdf(pages: int, ocr_text: str = "", **text_style) -> bytes:
+    def _scan_pdf(pages: int, ocr_text: str = "", under_image: bool = False, **text_style) -> bytes:
         pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 80), False)
         pixmap.clear_with(240)
         image = pixmap.tobytes("png")
         with pymupdf.open() as document:
             for _ in range(pages):
                 page = document.new_page()
+                if ocr_text and under_image:
+                    page.insert_text((72, 100), ocr_text, **text_style)
                 page.insert_image(page.rect, stream=image)
-                if ocr_text:
+                if ocr_text and not under_image:
                     page.insert_text((72, 100), ocr_text, **text_style)
             return document.tobytes()
 
+    async def _inspect(self, name: str, content: bytes) -> dict:
+        result = await self.client.post(
+            "/v1/pdf/inspect", files={"file": (name, content, "application/pdf")}
+        )
+        self.assertEqual(result.status_code, 200, name)
+        return result.json()
+
     async def test_image_only_scan_is_flagged_but_accepted(self):
-        result = await self.client.post(
-            "/v1/pdf/inspect",
-            files={"file": ("scan.pdf", self._scan_pdf(30), "application/pdf")},
-        )
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(result.json(), {"page_count": 30, "scanned": True})
+        self.assertEqual(await self._inspect("scan.pdf", self._scan_pdf(30)),
+                         {"page_count": 30, "scanned": True})
 
-    async def test_scan_with_a_transparent_tracking_code_is_still_flagged(self):
-        # Exam sites stamp each page with an invisible code; BabelDOC still rejects the scan.
+    async def test_scans_with_text_nobody_can_see_are_flagged(self):
+        # BabelDOC deletes the text, sees no change and rejects all of these as scans.
         code = "{#{QQABSQI1wgowgBaACQ5LEUHiCwqYkJKgLEoMwRAMOEwLyQFABIA=}#}"
-        result = await self.client.post(
-            "/v1/pdf/inspect",
-            files={"file": ("exam.pdf", self._scan_pdf(6, code, fill_opacity=0), "application/pdf")},
-        )
-        self.assertEqual(result.status_code, 200)
-        self.assertTrue(result.json()["scanned"])
-
-    async def test_scan_with_text_layer_and_plain_pdf_are_not_flagged(self):
         text = "This page already has a searchable OCR text layer."
         for name, content in (
-            ("ocr.pdf", self._scan_pdf(5, text)),
+            ("exam.pdf", self._scan_pdf(6, code, fill_opacity=0)),
             ("invisible-ocr.pdf", self._scan_pdf(5, text, render_mode=3)),
-            ("plain.pdf", self.pdf),
+            ("ocr-under-image.pdf", self._scan_pdf(5, text, under_image=True)),
         ):
+            self.assertTrue((await self._inspect(name, content))["scanned"], name)
+
+    async def test_sparse_visible_text_and_blank_pages_are_not_flagged(self):
+        # A line of real text over a picture (posters, brochures, slides) translates
+        # fine, although BabelDOC's own scan check rejects it.
+        text = "Choose fresh beef and mutton from licensed sellers."
+        with pymupdf.open() as document:
+            for _ in range(3):
+                document.new_page().insert_text((72, 100), text)
+            plain = document.tobytes()
+        for name, content in (
+            ("brochure.pdf", self._scan_pdf(5, text)),
+            ("plain.pdf", plain),
+            ("blank.pdf", self.pdf),
+        ):
+            self.assertFalse((await self._inspect(name, content))["scanned"], name)
+
+    async def test_translation_skips_babeldoc_scan_check_only_for_text_pdfs(self):
+        text = "Choose fresh beef and mutton from licensed sellers."
+        for content, skip in ((self._scan_pdf(3, text), True), (self._scan_pdf(3), False)):
+            self.runner.reset_mock()
             result = await self.client.post(
-                "/v1/pdf/inspect", files={"file": (name, content, "application/pdf")}
+                "/v1/translate", files={"file": ("document.pdf", content, "application/pdf")}
             )
-            self.assertEqual(result.status_code, 200, name)
-            self.assertFalse(result.json()["scanned"], name)
+            self.assertEqual(result.status_code, 200)
+            await asyncio.sleep(0)
+            settings = self.runner.call_args.args[1]
+            self.assertIs(settings.pdf.skip_scanned_detection, skip)
 
     async def test_quote_rejects_unavailable_engine(self):
         with patch("pdf2zh_next.translator.get_translator", side_effect=RuntimeError("private credential error")) as check:

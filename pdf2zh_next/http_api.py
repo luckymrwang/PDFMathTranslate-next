@@ -286,6 +286,9 @@ def _serialize_event(event: dict[str, Any], task: TaskState) -> dict[str, Any]:
         elif task.error_type == "DocumentTooComplexError":
             task.error_type = DOCUMENT_TOO_COMPLEX
             task.error = "该 PDF 结构过于复杂，超出解析安全上限，无法翻译"
+        elif task.error_type == "ScannedPDFDetectedError":
+            task.error_type = SCANNED_PDF
+            task.error = "该 PDF 是扫描件（页面是图片），无法直接翻译文字"
         return {
             "type": "error",
             "error": task.error,
@@ -401,6 +404,13 @@ async def _create_translation(
         shutil.rmtree(task_dir, ignore_errors=True)
         raise HTTPException(status_code=422, detail=f"invalid settings: {e}") from e
 
+    # BabelDOC's scan check rejects sparse-text pages; trust the verdict the quote used.
+    try:
+        scanned = await asyncio.to_thread(_is_scanned_pdf, input_path)
+    except Exception:  # noqa: BLE001 - unreadable files are reported by the translation itself
+        scanned = True
+    settings.pdf.skip_scanned_detection = not scanned
+
     task = TaskState(task_id=task_id, input_path=input_path, output_dir=output_dir)
     _tasks[task_id] = task
     task.worker = asyncio.create_task(_run_translation(task, settings))
@@ -417,40 +427,92 @@ ALREADY_TRANSLATED = "already_translated"
 DOCUMENT_TOO_COMPLEX = "document_too_complex"
 
 
-def _is_scanned_pdf(document: Any, sample_size: int = 20) -> bool:
-    """True when nearly every sampled page is a full-page image with (almost) no text.
+# BabelDOC found no text to translate: it saw a scan ("Scanned PDF detected") or
+# extracted no paragraphs from an image-only PDF. Retries cannot help.
+SCANNED_PDF = "scanned_pdf"
 
-    Such image-only PDFs have no text layer, so BabelDOC aborts them with
-    "Scanned PDF detected"; a PDF with an OCR text layer has text and passes.
-    Fully transparent text is not counted: exam sites stamp every page with an
-    invisible tracking code, which BabelDOC (comparing the page with and without
-    its text) still sees as a scan. An OCR layer (render mode 3) counts as text.
+# A page counts as text when it has this many visible characters and deleting
+# them changes at least _TEXT_PIXEL_SHARE of its rendered pixels.
+_MIN_TEXT_CHARS = 20
+_TEXT_PIXEL_SHARE = 0.0005
+# Pages are compared at 72 dpi like BabelDOC, scaled down beyond this many pixels.
+_SCAN_PIXEL_BUDGET = 2_000_000
+
+
+def _is_scanned_pdf(path: str | Path, sample_size: int = 20) -> bool:
+    """True when nearly every sampled non-blank page has no visible text.
+
+    This is the single scan verdict: inspection quotes with it, and translation
+    turns BabelDOC's own scan detection off for every PDF it does not flag, so a
+    PDF sold as text is never aborted halfway. BabelDOC's check compares each
+    page with and without its text and calls the page a scan when the two look
+    alike (SSIM > 0.95), which also rejects posters, brochures and slides whose
+    few lines of real text cover a small share of the page.
+
+    A page has visible text when deleting its text changes how it renders.
+    That leaves out what a reader cannot see and BabelDOC cannot replace in
+    place: a transparent tracking code stamped by exam sites, an OCR layer in
+    render mode 3, or OCR text hidden under the page image. Blank pages count
+    neither way.
     """
     import pymupdf
 
-    pages = document.page_count
-    step = max(1, pages // sample_size)
-    sampled = list(range(0, pages, step))[:sample_size]
-    scanned = 0
-    for index in sampled:
-        page = document[index]
-        if _visible_text_chars(page) >= 20:
-            continue
-        area = page.rect.width * page.rect.height
-        covered = 0.0
-        for info in page.get_image_info():
-            image = pymupdf.Rect(info["bbox"]) & page.rect
-            covered = max(covered, image.width * image.height)
-        if area > 0 and covered / area >= 0.6:
-            scanned += 1
-    return bool(sampled) and scanned / len(sampled) >= 0.8
+    with pymupdf.open(path) as source, pymupdf.open(path) as stripped:
+        pages = source.page_count
+        step = max(1, pages // sample_size)
+        content = text = 0
+        for index in list(range(0, pages, step))[:sample_size]:
+            verdict = _page_text_verdict(source[index], stripped[index])
+            if verdict is None:
+                continue
+            content += 1
+            text += verdict
+        return bool(content > 0 and (content - text) / content >= 0.8)
+
+
+def _page_text_verdict(page: Any, scratch: Any) -> bool | None:
+    """True for a page with visible text, False for a scan-like one, None if blank.
+
+    `scratch` is the same page in a second copy of the document; its text is deleted.
+    """
+    import numpy as np
+    import pymupdf
+
+    area = page.rect.width * page.rect.height
+    zoom = min(1.0, (_SCAN_PIXEL_BUDGET / area) ** 0.5) if area > 0 else 1.0
+    matrix = pymupdf.Matrix(zoom, zoom)
+
+    def render(target: Any) -> Any:
+        pixmap = target.get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY, alpha=False)
+        return np.frombuffer(pixmap.samples, np.uint8).astype(np.int16)
+
+    before = render(page)
+    if before.size == 0 or int(np.count_nonzero(before < 250)) < before.size * 0.001:
+        return None
+    if _visible_text_chars(page) < _MIN_TEXT_CHARS:
+        return False
+    try:
+        scratch.add_redact_annot(scratch.rect, fill=False)
+        scratch.apply_redactions(
+            images=pymupdf.PDF_REDACT_IMAGE_NONE,
+            graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+            text=pymupdf.PDF_REDACT_TEXT_REMOVE,
+        )
+        after = render(scratch)
+    except Exception:  # noqa: BLE001 - an odd page must not block the quote
+        logger.warning("scan check could not strip page %d text", page.number, exc_info=True)
+        return True
+    if after.shape != before.shape:
+        return True
+    changed = int(np.count_nonzero(np.abs(before - after) > 40))
+    return changed >= before.size * _TEXT_PIXEL_SHARE
 
 
 def _visible_text_chars(page: Any) -> int:
-    """Non-blank characters on the page, leaving out fully transparent text."""
+    """Non-blank characters on the page, leaving out transparent and invisible text."""
     count = 0
     for span in page.get_texttrace():
-        if span.get("opacity", 1) <= 0:
+        if span.get("opacity", 1) <= 0 or span.get("type") == 3:
             continue
         count += sum(1 for char in span.get("chars", ()) if not chr(char[0]).isspace())
     return count
@@ -533,8 +595,8 @@ async def inspect_pdf(file: UploadFile, data: str = Form(default="{}")) -> dict[
                     pages = document.page_count
                     if not 1 <= pages <= 1000:
                         raise ValueError("PDF must contain 1 to 1000 pages")
-                    return (pages, _is_babeldoc_producer(document.metadata),
-                            _is_scanned_pdf(document))
+                    already_translated = _is_babeldoc_producer(document.metadata)
+                return pages, already_translated, _is_scanned_pdf(tmp.name)
             except Exception as error:
                 raise HTTPException(status_code=422, detail="cannot inspect PDF") from error
 
