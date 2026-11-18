@@ -280,7 +280,7 @@ func TestScannedOrdersGetTheScanDiscount(t *testing.T) {
 		t.Fatal("every scanned order is discounted, not only the first", again.ScanFreePages)
 	}
 	if text := buy("text", "GPT-5.6", 10, false); text.ScanFreePages != 2 {
-		t.Fatal("a text PDF on GPT gets the 8折 too", text.ScanFreePages)
+		t.Fatal("a text PDF on GPT gets the 8 折 too", text.ScanFreePages)
 	}
 	for name, order := range map[string]PayOrder{
 		"one-page scan":    buy("tiny", "GPT-5.6", 1, true),
@@ -312,7 +312,7 @@ func TestPointsOrderFailureTellsUserWhatHappened(t *testing.T) {
 
 func TestScannedOrdersAreBoughtAsTheScanProduct(t *testing.T) {
 	s := testPayServer(t)
-	s.pay.cfg.ScanProducts = map[string]enginePrice{"GPT-5.6": {"scan-enhanced", 40}} // 8折 of 50
+	s.pay.cfg.ScanProducts = map[string]enginePrice{"GPT-5.6": {"scan-enhanced", 40}} // 8 折 of 50
 	buy := func(engine string, pages int, platform string) PayOrder {
 		t.Helper()
 		id, _ := newTradeNo()
@@ -330,12 +330,12 @@ func TestScannedOrdersAreBoughtAsTheScanProduct(t *testing.T) {
 	o := buy("GPT-5.6", 10, "")
 	if o.ProductID != "scan-enhanced" || o.UnitPrice != 40 || o.Quantity != 10 || o.Total != 400 ||
 		o.ScanFreePages != 0 || o.ScanDiscount != 100 {
-		t.Fatalf("a scan should be bought as the 8折 product: %+v", o)
+		t.Fatalf("a scan should be bought as the 8 折 product: %+v", o)
 	}
 	if !strings.Contains(orderSummary(o), "省 ¥1.00") {
 		t.Fatal("alert should show the saving:", orderSummary(o))
 	}
-	// 300 pages would save ¥30 at 8折; past the ¥20 cap it falls back to free pages.
+	// 300 pages would save ¥30 at 8 折; past the ¥20 cap it falls back to free pages.
 	big := buy("GPT-5.6", 300, "")
 	if big.ProductID != "enhanced" || big.ScanFreePages != 40 || big.Total != 260*50 || big.ScanDiscount != 2000 {
 		t.Fatalf("a large scan should be capped at ¥20: %+v", big)

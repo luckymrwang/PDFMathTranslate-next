@@ -1,6 +1,7 @@
-from babeldoc.docvision.base_doclayout import YoloBox, YoloResult
-
-from pdf2zh_next.http_api import TranslateRequest, _build_settings
+from babeldoc.docvision.base_doclayout import YoloBox
+from babeldoc.docvision.base_doclayout import YoloResult
+from pdf2zh_next.http_api import TranslateRequest
+from pdf2zh_next.http_api import _build_settings
 from pdf2zh_next.layout_protection import FigurePreservingLayoutModel
 
 
@@ -42,10 +43,8 @@ def _sent_to_translator(tmp_path, protect):
     import numpy as np
     import pymupdf
     from babeldoc.format.pdf.high_level import translate
-    from babeldoc.format.pdf.translation_config import (
-        TranslationConfig,
-        WatermarkOutputMode,
-    )
+    from babeldoc.format.pdf.translation_config import TranslationConfig
+    from babeldoc.format.pdf.translation_config import WatermarkOutputMode
     from babeldoc.translator.translator import BaseTranslator
 
     pdf = tmp_path / "figure.pdf"

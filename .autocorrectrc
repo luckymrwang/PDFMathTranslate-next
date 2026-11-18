@@ -1,0 +1,6 @@
+# AutoCorrect (Lint workflow). Product and service names are written exactly as
+# they appear in WeChat and alert titles, without a CJK space.
+textRules:
+  PDF翻译通: 0
+  PDF翻译: 0
+  Server酱: 0

@@ -21,7 +21,7 @@ type PayConfig struct {
 	StandardPrice, EnhancedPrice              int
 	// Engines priced separately; others use the standard or enhanced product.
 	EngineProducts map[string]enginePrice
-	// ScanProducts are the discounted (8折) per-page products GPT orders are bought as
+	// ScanProducts are the discounted (8 折) per-page products GPT orders are bought as
 	// (see scanDeal); an engine without one falls back to free pages.
 	ScanProducts map[string]enginePrice
 	// iOS (Apple) rejects orders under iosMinFen. With an iOS unit product configured,
@@ -39,7 +39,7 @@ type enginePrice struct {
 }
 
 // scanProductEnv maps a scan engine to its VIRTUALPAY_SCAN_<PREFIX>_PRODUCT_ID / _PRICE_FEN
-// pair: the 8折 product scanned PDFs are bought as.
+// pair: the 8 折 product scanned PDFs are bought as.
 var scanProductEnv = map[string]string{"GPT-5.6": "ENHANCED", "GPT-6": "GPT"}
 
 // engineProductEnv maps an engine to its optional VIRTUALPAY_<PREFIX>_PRODUCT_ID / _PRICE_FEN pair.
@@ -199,10 +199,10 @@ type PayOrder struct {
 	Scanned bool
 	// PaidAt is when the platform confirmed the cash payment (0 before it existed).
 	PaidAt int64
-	// ScanFreePages are pages left out of Quantity: the GPT 8折 discount
+	// ScanFreePages are pages left out of Quantity: the GPT 8 折 discount
 	// when no discounted scan product applies (see scanDeal).
 	ScanFreePages int
-	// ScanDiscount is what the GPT 8折 discount saved (fen, at the normal list price),
+	// ScanDiscount is what the GPT 8 折 discount saved (fen, at the normal list price),
 	// whether as free pages or as a cheaper scan product.
 	ScanDiscount int
 	// ScanWorker routes the order to the Mac scan worker instead of the Python API.
@@ -337,7 +337,7 @@ func (s *OrderStore) addPurchase(order *PayOrder, billed, free int, price func(*
 	}
 	defer tx.Rollback()
 	candidate := *order
-	// Past the 8折 cap the discount is taken as whole pages, because WeChat charges a
+	// Past the 8 折 cap the discount is taken as whole pages, because WeChat charges a
 	// registered price per page; the caller sizes it for this document.
 	if free > 0 && !candidate.Trial && billed > free {
 		candidate.ScanFreePages = free

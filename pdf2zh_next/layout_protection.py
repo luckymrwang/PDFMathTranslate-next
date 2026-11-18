@@ -1,6 +1,7 @@
 """Preserve figure text using BabelDOC's protected, non-text layout regions."""
 
-from babeldoc.docvision.base_doclayout import DocLayoutModel, YoloResult
+from babeldoc.docvision.base_doclayout import DocLayoutModel
+from babeldoc.docvision.base_doclayout import YoloResult
 
 # A detected figure whose area lies at least this much inside a table is treated
 # as part of the table. Layout models often tag a whole table (invoices, quotes)

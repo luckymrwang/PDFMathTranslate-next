@@ -99,7 +99,9 @@ python examples/mac-scan-worker/scan_worker.py process input.pdf out/ --output b
 
 ## 已知限制
 
+<!-- autocorrect-disable: the CSV columns are separated by an ASCII comma -->
 - 小额订单不做术语统一和质检，同一术语在不同页可能译法不同；可用 `GLOSSARY_FILE` 指定固定术语表（CSV：原文,译文）。
+<!-- autocorrect-enable -->
 - 质检由模型完成，可能漏掉问题，也可能误报；只重做一轮。
 - 大额订单的模型调用量约为小额的两倍。
 - 处理速度取决于模型并发和额度；数百页的文档可能需要几十分钟。

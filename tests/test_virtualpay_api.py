@@ -2,11 +2,11 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
+from unittest.mock import patch
 
 import httpx
 import pymupdf
-
 from pdf2zh_next import http_api as api
 
 

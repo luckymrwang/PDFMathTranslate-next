@@ -610,6 +610,7 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
     doc_layout_model = None
     if settings.pdf.skip_image_translation:
         from babeldoc.docvision.base_doclayout import DocLayoutModel
+
         from pdf2zh_next.layout_protection import FigurePreservingLayoutModel
 
         doc_layout_model = FigurePreservingLayoutModel(DocLayoutModel.load_available())

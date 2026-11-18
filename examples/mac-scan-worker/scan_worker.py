@@ -49,7 +49,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # spawn children re-import us
 
 import httpx  # noqa: E402
-
 import scan_pipeline  # noqa: E402
 
 ENV_FILE = Path.home() / ".config/pdfmath-scan-worker.env"
@@ -90,10 +89,10 @@ class Gateway:
         digest = hashlib.sha256()
         with self.http.stream("GET", f"/worker/scan/{order_id}/source") as r:
             if r.status_code in (409, 410):
-                raise PermanentFailure(f"source unavailable (HTTP {r.status_code})")
+                raise PermanentFailureError(f"source unavailable (HTTP {r.status_code})")
             r.raise_for_status()
             expected = r.headers.get("X-File-Sha256", "")
-            with open(dest, "wb") as f:
+            with Path(dest).open("wb") as f:
                 for chunk in r.iter_bytes(1 << 20):
                     f.write(chunk)
                     digest.update(chunk)
@@ -110,7 +109,7 @@ class Gateway:
 
     def upload(self, order_id: str, results: dict[str, Path], report: str = "", hold: bool = False,
                action: str = "result"):
-        files = {kind: (f"{order_id}-{kind}.pdf", open(path, "rb"), "application/pdf") for kind, path in results.items()}
+        files = {kind: (f"{order_id}-{kind}.pdf", Path(path).open("rb"), "application/pdf") for kind, path in results.items()}
         data = {"report": report, "hold": "1" if hold else "0"}
         try:
             r = self.http.post(f"/worker/scan/{order_id}/{action}", files=files or None, data=data,
@@ -119,7 +118,7 @@ class Gateway:
             for _, handle, _ in files.values():
                 handle.close()
         if r.status_code == 409:
-            raise scan_pipeline.Aborted(f"order no longer accepts a {action}: " + r.text[:200])
+            raise scan_pipeline.AbortedError(f"order no longer accepts a {action}: " + r.text[:200])
         r.raise_for_status()
 
     def fail(self, order_id: str, reason: str, retry: bool, pause: bool = False, interrupted: bool = False,
@@ -145,7 +144,7 @@ class Gateway:
         return r.json()
 
 
-class PermanentFailure(Exception):
+class PermanentFailureError(Exception):
     """Retrying cannot help (e.g. the source file is gone)."""
 
 
@@ -187,7 +186,7 @@ def review_model() -> str:
 
 def ready(client) -> str:
     """Empty when the Mac can take work, else why not (checked before claiming)."""
-    if not Path(os.path.expanduser(setting("OCRMYPDF"))).exists():
+    if not Path(setting("OCRMYPDF")).expanduser().exists():
         return "ocrmypdf not found"
     try:
         client.models.list()
@@ -206,7 +205,7 @@ CURRENT: dict = {}
 
 
 def boot_time() -> float:
-    out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout
+    out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout
     match = re.search(r"sec = (\d+)", out)
     return float(match[1]) if match else 0.0
 
@@ -240,7 +239,7 @@ def recover(gateway: Gateway, root: Path) -> bool:
     return True
 
 
-def on_terminate(signum, frame):
+def on_terminate(_signum, _frame):
     """Shutdown or launchctl stop: hand the current order back, then exit."""
     if CURRENT:
         try:
@@ -316,7 +315,7 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
             source=source, workdir=workdir, lang_in=job_info.get("lang_in", "en"),
             lang_out=job_info.get("lang_out", "zh"), output=job_info.get("output", "dual"),
             model=vision_model(job_info.get("engine", "")), review_model=review_model(),
-            workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
+            workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=str(Path(setting("OCRMYPDF")).expanduser()),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
             progress=lambda stage, pct: (beat.update(stage, pct), log.info("%s %s %.0f%%", order_id, stage, pct)),
             should_stop=beat.lost.is_set, full_qa=bool(job_info.get("full_qa")),
@@ -331,16 +330,16 @@ def handle(gateway: Gateway, client, job_info: dict, root: Path) -> int:
         gateway.upload(order_id, results, report=report, hold=hold)
         log.info("order %s %s", order_id, "held for review" if hold else "delivered")
         scan_pipeline.cleanup(workdir)
-    except scan_pipeline.QuotaExhausted as exc:
+    except scan_pipeline.QuotaExhaustedError as exc:
         # Not the order's fault: hand it back without using up an attempt, and wait.
         wait = pause_seconds(str(exc))
         log.error("model quota exhausted; pausing %d min: %s", wait // 60, exc)
         gateway.fail(order_id, f"模型额度用尽，暂停 {wait // 60} 分钟：{exc}", retry=True, pause=True)
         return wait
-    except scan_pipeline.Aborted as exc:
+    except scan_pipeline.AbortedError as exc:
         # Lease lost or order refunded; a re-queued order reuses the cached pages.
         log.warning("order %s stopped: %s", order_id, exc)
-    except PermanentFailure as exc:
+    except PermanentFailureError as exc:
         log.error("order %s cannot be processed: %s", order_id, exc)
         gateway.fail(order_id, str(exc), retry=False)
     except Exception as exc:
@@ -382,7 +381,7 @@ def night_idle(now: datetime.datetime | None = None) -> int:
 def run_forever():
     gateway = Gateway(setting("GATEWAY_URL"), setting("SCAN_WORKER_TOKEN"))
     client = model_client()
-    root = Path(os.path.expanduser(setting("WORK_DIR", "~/Library/Application Support/pdfmath-scan-worker")))
+    root = Path(setting("WORK_DIR", "~/Library/Application Support/pdfmath-scan-worker")).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     wait = int(setting("LONG_POLL_SECONDS", "300"))
     signal.signal(signal.SIGTERM, on_terminate)
@@ -463,13 +462,13 @@ def main():
         job = scan_pipeline.Job(
             source=Path(args.input).resolve(), workdir=out / "work", lang_in=args.lang_in, lang_out=args.lang_out,
             output=args.output, model=vision_model(""), review_model=review_model(),
-            workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=os.path.expanduser(setting("OCRMYPDF")),
+            workers=int(setting("TRANSLATE_WORKERS", "8")), ocrmypdf=str(Path(setting("OCRMYPDF")).expanduser()),
             glossary=scan_pipeline.load_glossary(os.environ.get("GLOSSARY_FILE")),
             progress=lambda stage, pct: print(f"[{pct:5.1f}%] {stage}", flush=True), full_qa=args.full_qa,
             shared_cache=Path(args.shared_cache).resolve() if args.shared_cache else None)
         for kind, path in scan_pipeline.process(job, model_client()).items():
             dest = out / f"{Path(args.input).stem}-{kind}.pdf"
-            os.replace(path, dest)
+            Path(path).replace(dest)
             print(dest)
         if job.report:
             print(scan_pipeline.format_report(job.report))

@@ -1,7 +1,7 @@
 import pytest
+from pdf2zh_next.http_api import TranslateRequest
+from pdf2zh_next.http_api import _build_settings
 from pydantic import ValidationError
-
-from pdf2zh_next.http_api import TranslateRequest, _build_settings
 
 
 @pytest.mark.parametrize(
@@ -20,7 +20,7 @@ from pdf2zh_next.http_api import TranslateRequest, _build_settings
     ],
 )
 def test_min_text_length_follows_source_language(tmp_path, lang_in, expected):
-    # Short CJK table words (居民, 项目名称) must be translated; Latin fragments
+    # Short CJK table words (居民，项目名称) must be translated; Latin fragments
     # under 5 characters ("No.", "set") stay skipped as BabelDOC intends.
     settings = _build_settings(TranslateRequest(lang_in=lang_in), tmp_path)
     assert settings.translation.min_text_length == expected

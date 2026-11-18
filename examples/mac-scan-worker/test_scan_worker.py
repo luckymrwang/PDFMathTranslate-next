@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 os.environ.setdefault("OCRMYPDF", "/bin/echo")
 
 import httpx  # noqa: E402
-
 import scan_pipeline  # noqa: E402
 import scan_worker  # noqa: E402
 
@@ -140,7 +139,7 @@ class ScanWorkerTest(unittest.TestCase):
         fake = FakeGateway()
 
         def process(job, client):
-            raise scan_pipeline.QuotaExhausted("usage limit reached; not asked again before 23:59 UTC+8")
+            raise scan_pipeline.QuotaExhaustedError("usage limit reached; not asked again before 23:59 UTC+8")
 
         wait = self.run_handle(fake, process)
         self.assertGreater(wait, 0)
@@ -218,11 +217,11 @@ class ScanWorkerTest(unittest.TestCase):
             self.assertEqual(scan_worker.night_idle(at(12)), 0)
 
     def test_rule_checks_find_leftovers_and_squeezed_text_but_ignore_noise(self):
-        R = scan_pipeline.pymupdf.Rect
-        lines = [{"bbox": R(0, 0, 100, 10), "text": "within ninety (90) days of 14.09.2020"},
-                 {"bbox": R(0, 20, 100, 30), "text": "This sentence was never translated"},
-                 {"bbox": R(0, 40, 100, 50), "text": "rau ae he"},
-                 {"bbox": R(0, 60, 100, 70), "text": "Visit www.kpezdmc.org.pk today please"}]
+        rect = scan_pipeline.pymupdf.Rect
+        lines = [{"bbox": rect(0, 0, 100, 10), "text": "within ninety (90) days of 14.09.2020"},
+                 {"bbox": rect(0, 20, 100, 30), "text": "This sentence was never translated"},
+                 {"bbox": rect(0, 40, 100, 50), "text": "rau ae he"},
+                 {"bbox": rect(0, 60, 100, 70), "text": "Visit www.kpezdmc.org.pk today please"}]
         result = {"groups": [{"ids": [0], "tr": "在九十（90）日内"}]}
         issues = scan_pipeline.rule_issues(lines, result, [{"ids": [0], "fs": 4.0, "scale": 0.5}])
         text = " ".join(issues)
@@ -255,17 +254,19 @@ class ScanWorkerTest(unittest.TestCase):
 
     def test_rule_checks_find_unspaced_chinese_leftovers(self):
         # Without spaces a whole Chinese sentence is one "word": it used to pass unseen.
-        R = scan_pipeline.pymupdf.Rect
-        lines = [{"bbox": R(0, 0, 100, 10), "text": "本合同自签订之日起生效"},
-                 {"bbox": R(0, 20, 100, 30), "text": "层 数"},
-                 {"bbox": R(0, 40, 100, 50), "text": "刘春华"},
-                 {"bbox": R(0, 60, 100, 70), "text": "0120050269号"}]
+        rect = scan_pipeline.pymupdf.Rect
+        # autocorrect-disable  # OCR text exactly as read, without CJK spaces
+        lines = [{"bbox": rect(0, 0, 100, 10), "text": "本合同自签订之日起生效"},
+                 {"bbox": rect(0, 20, 100, 30), "text": "层 数"},
+                 {"bbox": rect(0, 40, 100, 50), "text": "刘春华"},
+                 {"bbox": rect(0, 60, 100, 70), "text": "0120050269号"}]
         none = {"groups": []}
         issues = scan_pipeline.rule_issues(lines, none, [], "zh")
         self.assertEqual(len(issues), 1)
         self.assertTrue(issues[0].startswith(scan_pipeline.LEFTOVER))
         self.assertIn("本合同自签订之日起生效", issues[0])
         for short in ("层 数", "刘春华", "0120050269号"):
+            # autocorrect-enable
             self.assertNotIn(short, issues[0], "labels, names and numbers under 4 characters are not prose")
         self.assertEqual(scan_pipeline.rule_issues(lines, none, [], "en"), [],
                          "Chinese already in an English source is not leftover source text")
@@ -488,9 +489,9 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertEqual((job.report["checked"], job.report["redone"], job.report["problems"]), (1, 1, []))
 
     def test_light_check_failure_delivers_the_first_translation(self):
-        job, seen = self._light_run({0: ["残留原文：x"]}, [], error=scan_pipeline.QuotaExhausted("usage limit"))
+        job, seen = self._light_run({0: ["残留原文：x"]}, [], error=scan_pipeline.QuotaExhaustedError("usage limit"))
         self.assertEqual(seen["translate"], [])
-        self.assertIn("QuotaExhausted", job.report["review_error"])
+        self.assertIn("QuotaExhaustedError", job.report["review_error"])
         self.assertIn("复核未完成，按首轮译文交付", scan_pipeline.format_report(job.report))
 
     def test_orphan_pass_sees_the_page(self):
@@ -533,7 +534,9 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertEqual((box.x0, src), (557, "Lecture"))
         # a number the translation repeats is part of the text and gets covered
         line = self._line([("2023", 100, 130), ("Annual", 134, 170), ("Report", 174, 210)])
+        # autocorrect-disable  # a model translation without a CJK space
         self.assertEqual(scan_pipeline.cover_box(line, "2023年度报告", typical=12)[0].x0, 100)
+        # autocorrect-enable
 
     def test_formula_beside_a_label_is_not_covered(self):
         line = self._line([(">", 192, 214), ("ak", 218, 245), ("-", 249, 266), ("Term", 270, 305),
@@ -645,7 +648,7 @@ class ScanWorkerTest(unittest.TestCase):
         layout = scan_pipeline.split_long_pages(job)
         with pymupdf.open(self.root / "tiles.pdf") as tiles:
             self.assertEqual(tiles.page_count, len(layout))
-            self.assertTrue(all(abs(t.rect.height - (y1 - y0)) < 0.5 for t, (_, y0, y1) in zip(tiles, layout)))
+            self.assertTrue(all(abs(t.rect.height - (y1 - y0)) < 0.5 for t, (_, y0, y1) in zip(tiles, layout, strict=True)))
             # A dual result: each tile page twice as wide, as _render_chunk builds it.
             dual = pymupdf.open()
             for t in tiles:
@@ -669,10 +672,10 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertEqual(scan_worker.pause_seconds("no time given"), 900)
 
     def test_quota_errors_are_recognized(self):
-        class RateLimited(Exception):
+        class RateLimitedError(Exception):
             status_code = 429
 
-        self.assertTrue(scan_pipeline._quota_error(RateLimited("x")))
+        self.assertTrue(scan_pipeline._quota_error(RateLimitedError("x")))
         self.assertTrue(scan_pipeline._quota_error(Exception("The usage limit has been reached")))
         self.assertFalse(scan_pipeline._quota_error(Exception("connection reset")))
 

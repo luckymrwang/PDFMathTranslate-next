@@ -180,7 +180,7 @@ def _get_semaphore() -> asyncio.Semaphore:
 # BabelDOC skips paragraphs under 5 characters. That suits Latin scripts, where
 # such fragments are mostly abbreviations a translator gets wrong out of context
 # ("No." -> "不。"), but 2-4 Chinese, Japanese or Korean characters are whole
-# words: invoice and form tables (居民, 项目名称, 数 量) stayed untranslated.
+# words: invoice and form tables (居民，项目名称，数 量) stayed untranslated.
 # One character stays skipped: vertical labels are split into single characters.
 CJK_MIN_TEXT_LENGTH = 2
 DEFAULT_MIN_TEXT_LENGTH = 5
@@ -331,7 +331,7 @@ async def _run_translation(task: TaskState, settings: SettingsModel) -> None:
 
 
 @asynccontextmanager
-async def _lifespan(app: FastAPI):
+async def _lifespan(_app: FastAPI):
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     # Task state is in memory, so task dirs left by a previous process are orphans.
     for child in WORK_DIR.iterdir():
@@ -686,7 +686,7 @@ async def create_translation(
                 json.dump(result, tmp)
                 tmp.flush()
                 os.fsync(tmp.fileno())
-            os.replace(temp_name, marker)
+            Path(temp_name).replace(marker)
         except Exception:
             if temp_name:
                 Path(temp_name).unlink(missing_ok=True)
@@ -822,7 +822,8 @@ async def serve(host: str | None = None, port: int | None = None) -> None:
 
     config = uvicorn.Config(
         app,
-        host=host or os.environ.get("PDF2ZH_API_HOST", "0.0.0.0"),
+        # All interfaces by default for containers; deployments set PDF2ZH_API_HOST.
+        host=host or os.environ.get("PDF2ZH_API_HOST", "0.0.0.0"),  # noqa: S104
         port=port or int(os.environ.get("PDF2ZH_API_PORT", "11008")),
     )
     await uvicorn.Server(config).serve()

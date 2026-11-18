@@ -161,6 +161,12 @@ max-complexity = 10 # 函数圈复杂度阈值
 
 [tool.ruff.lint.per-file-ignores]
 "pdf2zh_next/gui.py" = ["S104"] # 忽略命名规范
-"tests/*" = ["S101"]            # 在测试文件中允许 assert
+"tests/*" = [
+    "S101", # 在测试文件中允许 assert
+    "S108", # fixed /tmp paths that are never written
+    "S301", # pickle round-trips of our own exception classes
+]
+# Stubs replace pipeline functions and must accept their full signatures.
+"examples/mac-scan-worker/test_*.py" = ["ARG001"]
 "**/__init__.py" = ["F401"]     # 允许未使用的导入
 "docs/*" = ["A001"]

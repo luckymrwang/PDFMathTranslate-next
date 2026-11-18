@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 
 from pdf2zh_next.translator.translator_impl.google import GoogleTranslator
 from pdf2zh_next.translator.translator_impl.google import _google_token

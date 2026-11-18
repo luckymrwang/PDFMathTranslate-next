@@ -25,10 +25,12 @@ import statistics
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
-from typing import Callable
 
 import pymupdf
 
@@ -48,6 +50,7 @@ NAME_RULE = ("人名：手写签名保持原样；印刷的人名要处理——
              "不同时按惯例音译：中文人名用汉语拼音，姓在前、名连写、不标声调（如“刘春华”译为“Liu Chunhua”），"
              "日文人名用罗马字；译成中文时，拉丁字母人名保持原样。不要按字义意译人名。")
 
+# autocorrect-disable  # prompt wording is tuned for the model; keep it verbatim
 SYSTEM = """你是专业的文档译者。用户会发来一页扫描文档的图片，以及从图上 OCR 出来的文字行列表（JSON，每行有 id、text 和 box=[x0,y0,x1,y1]，单位 pt，页面宽高为 {width}x{height}）。
 请结合图片，把文字从{source}翻译成{target}，只输出一个 JSON 对象：
 {{"groups": [{{"ids": [<id>, ...], "tr": "<译文>"}}, ...], "keep": [<id>, ...]}}
@@ -68,13 +71,14 @@ SYSTEM = """你是专业的文档译者。用户会发来一页扫描文档的�
 - 数字、金额、日期、期限、条款编号、交叉引用、公式、变量名、代码、单位必须与图片完全一致。
 - """ + NAME_RULE + """
 - 使用该领域规范术语，译文简洁，长度尽量不超过原文所占空间。不要用括号附注原文。"""
+# autocorrect-enable
 
 
-class Aborted(Exception):
+class AbortedError(Exception):
     """Raised when the caller asks the pipeline to stop (e.g. the order was refunded)."""
 
 
-class QuotaExhausted(Exception):
+class QuotaExhaustedError(Exception):
     """Every configured model hit its usage limit; the order should wait, not fail."""
 
 
@@ -98,7 +102,7 @@ class Job:
     render_procs: int = 3
     ocrmypdf: str = "ocrmypdf"
     glossary: str = ""
-    progress: Callable[[str, float], None] = lambda stage, pct: None
+    progress: Callable[[str, float], None] = lambda _stage, _pct: None
     should_stop: Callable[[], bool] = lambda: False
     full_qa: bool = False  # glossary + vision review of every page + one redo (large orders)
     # Every other order: free rule checks on every page; only pages they flag get a
@@ -118,7 +122,7 @@ def write_atomic(path: Path, text: str):
     """Write via a temp file + rename, so a power cut never leaves half a file behind."""
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text)
-    os.replace(tmp, path)
+    tmp.replace(path)
 
 
 def _shared_path(job: Job, kind: str, *parts) -> Path | None:
@@ -159,7 +163,7 @@ def prune_shared(root: Path, days: int = 30):
 
 def _check(job: Job):
     if job.should_stop():
-        raise Aborted("stopped")
+        raise AbortedError("stopped")
 
 
 # ---------------------------------------------------------------- straighten / OCR
@@ -176,7 +180,7 @@ def run_ocr(job: Job, src: Path, dest: Path, rotate: bool = False):
         proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError("OCR failed: " + (proc.stderr or proc.stdout)[-400:])
-    os.replace(part, dest)
+    part.replace(dest)
 
 
 def _image_page(out: pymupdf.Document, page: pymupdf.Page):
@@ -331,7 +335,7 @@ def run_backup_ocr(job: Job, upright: Path) -> Path | None:
                                "--optimize", "0", "-j", "8", "-l", attempt, str(upright), str(part)],
                               capture_output=True, text=True)
         if proc.returncode == 0:
-            os.replace(part, dest)
+            part.replace(dest)
             return dest
     return None
 
@@ -379,7 +383,7 @@ def _chat(job: Job, client, system: str, payload, images: list[str], what: str, 
         _check(job)
         models = [m.strip() for m in model.split(",") if m.strip() and m.strip() not in job.exhausted]
         if not models:
-            raise QuotaExhausted(str(last))
+            raise QuotaExhaustedError(str(last))
         try:
             text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
             content = [{"type": "text", "text": text}]
@@ -399,14 +403,14 @@ def _chat(job: Job, client, system: str, payload, images: list[str], what: str, 
             if not isinstance(result, dict) or key not in result:
                 raise ValueError(f"no {key} in model answer")
             return result
-        except Aborted:
+        except AbortedError:
             raise
         except Exception as exc:  # retry transient model/proxy errors
             last = exc
             if _quota_error(exc):
                 job.exhausted.add(models[0])
     if last is not None and _quota_error(last):
-        raise QuotaExhausted(str(last))
+        raise QuotaExhaustedError(str(last))
     raise RuntimeError(f"{what}: model call failed: {last}")
 
 
@@ -501,10 +505,10 @@ def translate_page(job: Job, client, upright_path: Path, ocr_path: Path, index: 
 # ---------------------------------------------------------------- rendering
 def _colours(pix: pymupdf.Pixmap, rect: pymupdf.Rect):
     """(background, text) RGB 0-1 sampled around / inside rect."""
-    W, H = pix.width, pix.height
+    width, height = pix.width, pix.height
 
     def px(x, y):
-        return pix.pixel(min(max(int(x * SCALE), 0), W - 1), min(max(int(y * SCALE), 0), H - 1))[:3]
+        return pix.pixel(min(max(int(x * SCALE), 0), width - 1), min(max(int(y * SCALE), 0), height - 1))[:3]
 
     ring = []
     for t in range(21):
@@ -579,19 +583,20 @@ def render_translation(doc: pymupdf.Document, index: int, lines, result, archive
         if body:
             cap = 1.15 * statistics.median(body)
             jobs = [(r, lh, min(fs, cap) if lh < 1.5 * typical else fs, t, b) for r, lh, fs, t, b in jobs]
-    for rect, lh, fs, text, boxes in jobs:  # cover first so later text is never painted over
+    for rect, lh, _fs, _text, boxes in jobs:  # cover first so later text is never painted over
         bg, _ = _colours(pix, rect)
         for b in boxes:
             pad_x, pad_y = 0.12 * lh, 0.15 * lh  # tight, so table borders survive
             page.draw_rect(pymupdf.Rect(b.x0 - pad_x, b.y0 - pad_y, b.x1 + pad_x, b.y1 + pad_y),
                            color=None, fill=bg, overlay=True)
-    for n, (rect, lh, fs, text, boxes) in enumerate(jobs):
+    for n, (rect, lh, fs, text, _boxes) in enumerate(jobs):
         _, fg = _colours(pix, rect)
+        colour = "".join(f"{int(c * 255):02x}" for c in fg)
         bold = "bold" if fs > 14 else "normal"
         css = (f"@font-face {{font-family: f; src: url({font}-Regular.ttf);}}"
                f"@font-face {{font-family: f; src: url({font}-Bold.ttf); font-weight: bold;}}"
                f"* {{font-family: f; font-size: {fs:.1f}px; line-height: 1.2; color: "
-               f"#{''.join('%02x' % int(c * 255) for c in fg)}; font-weight: {bold}; margin: 0; padding: 0;}}")
+               f"#{colour}; font-weight: {bold}; margin: 0; padding: 0;}}")
         box = pymupdf.Rect(rect.x0, rect.y0 - 0.2 * lh, rect.x1 + 0.1 * rect.width,
                            max(rect.y1 + 0.3 * lh, rect.y0 - 0.2 * lh + 1.35 * fs))
         html = text.replace("&", "&amp;").replace("<", "&lt;").replace("\n", "<br>")
@@ -622,7 +627,7 @@ def _render_chunk(task):
     for out, dest in ((dual, dual_dest), (mono, mono_dest)):
         if dest:
             out.save(dest + ".tmp", garbage=4, deflate=True)
-            os.replace(dest + ".tmp", dest)
+            Path(dest + ".tmp").replace(dest)
     return pages
 
 
@@ -718,7 +723,7 @@ def split_long_pages(job: Job) -> list[list[float]] | None:
         tiles, layout = pymupdf.open(), []
         for page, page_cuts in zip(src, cuts, strict=True):
             edges = [0.0, *page_cuts, page.rect.height]
-            for y0, y1 in zip(edges, edges[1:]):
+            for y0, y1 in zip(edges, edges[1:], strict=False):
                 tile = tiles.new_page(width=page.rect.width, height=y1 - y0)
                 tile.show_pdf_page(tile.rect, src, page.number,
                                    clip=pymupdf.Rect(0, y0, page.rect.width, y1))
@@ -740,7 +745,7 @@ def stitch_tiles(path: Path, layout: list[list[float]]):
             page.show_pdf_page(pymupdf.Rect(0, y0, width, y1), tiles, n)
         out.set_metadata(tiles.metadata)
         out.save(path.with_suffix(".stitched.pdf"), garbage=4, deflate=True)
-    os.replace(path.with_suffix(".stitched.pdf"), path)
+    path.with_suffix(".stitched.pdf").replace(path)
 
 
 def _merge(parts: list[Path], dest: Path, dpi: int = RESULT_DPI_RANGE[1]):
@@ -853,7 +858,8 @@ def load_glossary(path: str | None) -> str:
     if not path or not Path(path).exists():
         return ""
     import csv
-    rows = [r for r in csv.reader(open(path, encoding="utf-8"))][1:]
+    with Path(path).open(encoding="utf-8") as f:
+        rows = list(csv.reader(f))[1:]
     table = "\n".join(f"{r[0]} = {r[1]}" for r in rows if len(r) >= 2)
     return "\n\n术语表（必须严格按此翻译）：\n" + table if table else ""
 
@@ -944,7 +950,10 @@ def format_report(report: dict) -> str:
                  f"质检：{report['pages']} 页，首轮 {report['redone']} 页有问题已重做，"
                  f"最终 {len(report['problems'])} 页仍有问题"]
     for item in report["problems"][:10]:
-        lines.append(f"· {item.get('label') or '第 %d 页' % item['page']}：" + "；".join(item["issues"])[:150])
+        label = item.get("label") or f"第 {item['page']} 页"
+        # autocorrect-disable  # Chinese report: full-width colon
+        lines.append(f"· {label}：" + "；".join(item["issues"])[:150])
+        # autocorrect-enable
     if len(report["problems"]) > 10:
         lines.append(f"· 另有 {len(report['problems']) - 10} 页")
     return "\n".join(lines)
@@ -1041,7 +1050,7 @@ def _light_quality_check(job: Job, client, upright, ocr, tess, total):
         if job.output not in ("mono", "both"):  # the review looks at mono pages
             _render(job, upright, ocr, tess, total, chunks, 98, 98.3, mono=True, dual=False)
         found = _quality_check(job, client, upright, ocr, tess, flagged, 98.3, 98.6, confirm=True)
-    except Aborted:
+    except AbortedError:
         raise
     except Exception as exc:  # incl. the review model's quota: never hold a finished order back
         report["review_error"] = f"{type(exc).__name__}: {exc}"[:200]
@@ -1056,7 +1065,7 @@ def _light_quality_check(job: Job, client, upright, ocr, tess, total):
     _render(job, upright, ocr, tess, total, sorted({i // CHUNK for i in redo}), 98.8, 99, mono=True)
     try:
         problems = _quality_check(job, client, upright, ocr, tess, redo, 99, 99.2, confirm=True)
-    except Aborted:
+    except AbortedError:
         raise
     except Exception as exc:
         report["review_error"] = f"{type(exc).__name__}: {exc}"[:200]
