@@ -183,9 +183,9 @@ def run_ocr(job: Job, src: Path, dest: Path, rotate: bool = False):
     part.replace(dest)
 
 
-def _image_page(out: pymupdf.Document, page: pymupdf.Page, dpi: int = BAKE_DPI):
+def _image_page(out: pymupdf.Document, page: pymupdf.Page):
     """Append page as a flat image with its /Rotate baked in."""
-    pix = page.get_pixmap(dpi=dpi, alpha=False)
+    pix = page.get_pixmap(dpi=BAKE_DPI, alpha=False)
     target = out.new_page(width=page.rect.width, height=page.rect.height)
     target.insert_image(target.rect, stream=pix.tobytes("jpeg", jpg_quality=88))
 
@@ -239,10 +239,12 @@ def _straighten(job: Job) -> tuple[Path, Path]:
         for n, i in enumerate(turned):
             ocr.delete_page(i)
             ocr.insert_pdf(fixed, from_page=n, to_page=n, start_at=i)
-    # Pages OCR found nothing on (small screenshots on an otherwise empty page).
-    blank = [i for i, page in enumerate(ocr) if not page.get_text().strip() and page.get_images()]
-    if blank and _reocr_blank(job, ocr, blank):
-        turned = turned or [-1]
+    # Pages OCR found nothing on: one small screenshot on an otherwise empty page
+    # makes Apple OCR skip the page, so read those from a crop of their content.
+    blank = [i for i, page in enumerate(ocr) if not page.get_text().strip()]
+    found = _reocr_blank(job, ocr, blank) if blank else {}
+    # Always written, so a rerun never reads lines left by an earlier attempt.
+    write_atomic(job.workdir / "blank-lines.json", json.dumps(found, ensure_ascii=False))
     if not turned:
         return ocr_path, ocr_path
     upright = job.workdir / "ocr-upright.pdf"
@@ -250,31 +252,76 @@ def _straighten(job: Job) -> tuple[Path, Path]:
     return upright, upright
 
 
-def _reocr_blank(job: Job, ocr: pymupdf.Document, blank: list[int]) -> bool:
-    """Read pages Apple OCR returned no text for; True when text was found.
+def _content_rect(page: pymupdf.Page) -> pymupdf.Rect | None:
+    """Where the page has something on it (not white), in page coordinates."""
+    pix = page.get_pixmap(dpi=60, alpha=False)
+    w, h, n = pix.width, pix.height, pix.n
+    data = pix.samples
+    rows = [y for y in range(h) if min(data[y * w * n:(y + 1) * w * n]) < 240]
+    if not rows:
+        return None
+    lines = range(rows[0], rows[-1] + 1, 2)
+    cols = [x for x in range(w) if min(data[(y * w + x) * n] for y in lines) < 240]
+    if not cols:
+        return None
+    scale = 72 / 60
+    return pymupdf.Rect(cols[0] * scale, rows[0] * scale,
+                        (cols[-1] + 1) * scale, (rows[-1] + 1) * scale) & page.rect
 
-    A page holding one small screenshot can come back empty, and rasterizing the
-    whole page again at the default DPI does not help: on such a page Apple OCR
-    reads 200 DPI but nothing at 300. So try a few lower DPIs in turn.
+
+def _reocr_blank(job: Job, ocr: pymupdf.Document, blank: list[int]) -> dict[str, list[dict]]:
+    """Lines for pages Apple OCR read nothing from, keyed by page number.
+
+    It skips a page that is mostly blank with one small screenshot at the top. Cropping
+    such a page to its content makes it read the screenshot at the same resolution, so
+    the crops are OCR'd (all in one run) and the lines moved back by each crop's offset.
+    Pages whose content fills most of the page would OCR the same as before: skipped.
     """
-    for dpi in (200, 150, 250, 120):
-        subset = pymupdf.open()
-        for i in blank:
-            _image_page(subset, ocr[i], dpi)
-        path, out = job.workdir / f"blank-{dpi}.pdf", job.workdir / f"blank-{dpi}-ocr.pdf"
-        subset.save(path, garbage=3, deflate=True)
-        try:
-            run_ocr(job, path, out)
-        except RuntimeError:
-            continue
-        fixed = pymupdf.open(out)
-        if not any(page.get_text().strip() for page in fixed):
-            continue
-        for n, i in enumerate(blank):
-            ocr.delete_page(i)
-            ocr.insert_pdf(fixed, from_page=n, to_page=n, start_at=i)
-        return True
-    return False
+    crops = []
+    for i in blank:
+        rect = _content_rect(ocr[i])
+        if rect is not None and not rect.is_empty and rect.get_area() < 0.8 * ocr[i].rect.get_area():
+            crops.append((i, rect))
+    if not crops:
+        return {}
+    doc = pymupdf.open()
+    for i, rect in crops:
+        target = doc.new_page(width=rect.width, height=rect.height)
+        target.show_pdf_page(target.rect, ocr, i, clip=rect)
+    path, out = job.workdir / "blank-crops.pdf", job.workdir / "blank-crops-ocr.pdf"
+    doc.save(path, garbage=3, deflate=True)
+    try:
+        run_ocr(job, path, out)
+    except RuntimeError:  # the pages stay as they were before this pass
+        return {}
+    found: dict[str, list[dict]] = {}
+    with pymupdf.open(out) as read:
+        for n, (i, rect) in enumerate(crops):
+            lines = _page_lines(read[n])
+            if not lines:
+                continue
+
+            def moved(r, dx=rect.x0, dy=rect.y0):
+                return [r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy]
+
+            found[str(i)] = [{"bbox": moved(l["bbox"]), "text": l["text"],
+                              "words": [[w, moved(r)] for w, r in l["words"]]} for l in lines]
+    return found
+
+
+def _blank_lines(page: pymupdf.Page) -> list[dict]:
+    """Lines _reocr_blank read from a crop of a page Apple OCR returned nothing for.
+
+    They live in blank-lines.json beside the OCR document, so every caller (translation,
+    rendering, quality checks, glossary) sees the same lines without extra plumbing.
+    """
+    name = page.parent.name if page.parent is not None else ""
+    path = Path(name).parent / "blank-lines.json" if name else None
+    if path is None or not path.exists():
+        return []
+    saved = (json.loads(path.read_text() or "{}")).get(str(page.number)) or []
+    return [{"bbox": pymupdf.Rect(l["bbox"]), "text": l["text"],
+             "words": [(w, pymupdf.Rect(r)) for w, r in l.get("words") or []]} for l in saved]
 
 
 # ---------------------------------------------------------------- translation
@@ -345,6 +392,8 @@ def ocr_lines(page: pymupdf.Page, backup: pymupdf.Page | None = None) -> list[di
     fill those holes; the vision model corrects their text from the image.
     """
     lines = _page_lines(page)
+    if not lines:
+        lines = _blank_lines(page)  # Apple OCR skipped the page; read from a crop instead
     if backup is not None:
         found = [l["bbox"] for l in lines]
         extra = [l for l in _page_lines(backup)

@@ -671,6 +671,64 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertTrue(25 * 60 < seconds <= 32 * 60, seconds)
         self.assertEqual(scan_worker.pause_seconds("no time given"), 900)
 
+    def test_content_rect_finds_one_screenshot_on_an_otherwise_blank_page(self):
+        doc = scan_pipeline.pymupdf.open()
+        page = doc.new_page(width=612, height=792)
+        page.draw_rect(scan_pipeline.pymupdf.Rect(100, 50, 500, 200), color=None, fill=(0.5, 0.5, 0.5))
+        rect = scan_pipeline._content_rect(page)
+        self.assertAlmostEqual(rect.x0, 100, delta=4)
+        self.assertAlmostEqual(rect.y0, 50, delta=4)
+        self.assertAlmostEqual(rect.x1, 500, delta=4)
+        self.assertAlmostEqual(rect.y1, 200, delta=4)
+
+    def test_blank_page_lines_are_read_from_the_side_file(self):
+        work = self.root / "blank"
+        work.mkdir()
+        doc = scan_pipeline.pymupdf.open()
+        doc.new_page(width=612, height=792)  # Apple OCR left this page empty
+        path = work / "ocr.pdf"
+        doc.save(path)
+        scan_pipeline.write_atomic(work / "blank-lines.json", json.dumps({
+            "0": [{"bbox": [50, 30, 300, 46], "text": "确认解绑", "words": [["确认", [50, 30, 90, 46]]]}]}))
+        lines = scan_pipeline.ocr_lines(scan_pipeline.pymupdf.open(path)[0])
+        self.assertEqual([l["text"] for l in lines], ["确认解绑"])
+        self.assertEqual(lines[0]["bbox"], scan_pipeline.pymupdf.Rect(50, 30, 300, 46))
+        self.assertEqual(lines[0]["words"], [("确认", scan_pipeline.pymupdf.Rect(50, 30, 90, 46))])
+
+    def test_reocr_blank_moves_crop_lines_back_onto_the_page(self):
+        doc = scan_pipeline.pymupdf.open()
+        for top in (50, 300):  # two pages, each one small block on white
+            page = doc.new_page(width=612, height=792)
+            page.draw_rect(scan_pipeline.pymupdf.Rect(100, top, 500, top + 150), color=None, fill=(0.5, 0.5, 0.5))
+        full = doc.new_page(width=612, height=792)  # content everywhere: re-OCR would not help
+        full.draw_rect(full.rect, color=None, fill=(0.5, 0.5, 0.5))
+        runs = []
+
+        def fake_ocr(job, src, dest, rotate=False):  # noqa: ARG001 - mirrors run_ocr
+            crops = scan_pipeline.pymupdf.open(src)
+            runs.append(len(crops))
+            for n, crop in enumerate(crops):
+                crop.insert_text((10, 20), f"Confirm unlink {n}", fontname="helv", fontsize=12)
+            crops.save(dest)
+
+        job = self._job("crop")
+        with mock.patch.object(scan_pipeline, "run_ocr", side_effect=fake_ocr):
+            found = scan_pipeline._reocr_blank(job, doc, [0, 1, 2])
+        self.assertEqual(runs, [2], "both cropped pages in one OCR run; the full page skipped")
+        self.assertEqual(sorted(found), ["0", "1"])
+        for key, top in (("0", 50), ("1", 300)):
+            line = found[key][0]
+            self.assertEqual(line["text"], f"Confirm unlink {key}")
+            self.assertTrue(100 < line["bbox"][0] < 140, line["bbox"])
+            self.assertTrue(top < line["bbox"][1] < top + 45, line["bbox"])
+
+    def test_failed_crop_ocr_leaves_pages_as_they_were(self):
+        doc = scan_pipeline.pymupdf.open()
+        page = doc.new_page(width=612, height=792)
+        page.draw_rect(scan_pipeline.pymupdf.Rect(100, 50, 500, 200), color=None, fill=(0.5, 0.5, 0.5))
+        with mock.patch.object(scan_pipeline, "run_ocr", side_effect=RuntimeError("OCR failed")):
+            self.assertEqual(scan_pipeline._reocr_blank(self._job("fail"), doc, [0]), {})
+
     def test_quota_errors_are_recognized(self):
         class RateLimitedError(Exception):
             status_code = 429
