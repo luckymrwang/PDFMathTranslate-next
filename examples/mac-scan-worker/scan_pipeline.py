@@ -656,6 +656,93 @@ def source_dpi(path: Path) -> int:
     return int(min(max(best or high, low), high))
 
 
+# ---------------------------------------------------------------- long pages
+# E-commerce detail images and phone screenshots come as one page many times taller
+# than wide (461 x 7800 pt). Apple OCR finds almost nothing on such a page, and the
+# model sees it squeezed under MAX_IMAGE_PIXELS at ~76 dpi, so lines are missed and
+# translations land on the wrong lines. Such pages are cut into tiles of about
+# TILE_RATIO x their width, at the quietest row near each cut so text lines stay
+# whole; every tile is OCR'd, translated and laid out as a page of its own, and the
+# results are stacked back into the original page.
+LONG_PAGE_RATIO = 2.5
+TILE_RATIO = 1.4
+
+
+def _row_busyness(page: pymupdf.Page, dpi: int = 36) -> tuple[list[float], float]:
+    """Per pixel row: how much the row varies (0 for blank or flat rows); and pt per row."""
+    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False)
+    data, w = pix.samples, pix.width
+    rows = []
+    for y in range(pix.height):
+        row = data[y * pix.stride:y * pix.stride + w]
+        mean = sum(row) / w
+        rows.append((sum((v - mean) ** 2 for v in row) / w) ** 0.5)
+    smooth = [statistics.fmean(rows[max(0, y - 1):y + 2]) for y in range(len(rows))]
+    return smooth, page.rect.height / pix.height
+
+
+def tile_cuts(page: pymupdf.Page) -> list[float]:
+    """Cut positions (pt) splitting a long page into tiles; empty for ordinary pages."""
+    width, height = page.rect.width, page.rect.height
+    if page.rotation % 360 or height <= LONG_PAGE_RATIO * width:
+        return []
+    busy, step = _row_busyness(page)
+    target = TILE_RATIO * width
+    cuts, last = [], 0.0
+    while height - last > 1.25 * target:
+        lo = int((last + 0.75 * target) / step)
+        hi = min(int((last + 1.25 * target) / step), len(busy) - 1)
+        aim = (last + target) / step
+        # Prefer the widest blank band (the gap between blocks, not between two lines of
+        # one paragraph) and cut through its middle; with no blank row, the quietest row.
+        quiet = max(2.0, min(busy[lo:hi + 1]) + 1.0)
+        bands, start = [], None
+        for y in range(lo, hi + 2):
+            if y <= hi and busy[y] <= quiet:
+                start = y if start is None else start
+            elif start is not None:
+                bands.append((start, y - 1))
+                start = None
+        a, b = max(bands, key=lambda band: (band[1] - band[0], -abs((band[0] + band[1]) / 2 - aim)))
+        last = (a + b) / 2 * step
+        cuts.append(last)
+    return cuts
+
+
+def split_long_pages(job: Job) -> list[list[float]] | None:
+    """Write job.workdir/tiles.pdf; returns [page, y0, y1] per tile, or None if no page is long."""
+    with pymupdf.open(job.source) as src:
+        cuts = [tile_cuts(page) for page in src]
+        if not any(cuts):
+            return None
+        tiles, layout = pymupdf.open(), []
+        for page, page_cuts in zip(src, cuts, strict=True):
+            edges = [0.0, *page_cuts, page.rect.height]
+            for y0, y1 in zip(edges, edges[1:]):
+                tile = tiles.new_page(width=page.rect.width, height=y1 - y0)
+                tile.show_pdf_page(tile.rect, src, page.number,
+                                   clip=pymupdf.Rect(0, y0, page.rect.width, y1))
+                layout.append([page.number, y0, y1])
+    tiles.save(job.workdir / "tiles.pdf", garbage=3, deflate=True)
+    return layout
+
+
+def stitch_tiles(path: Path, layout: list[list[float]]):
+    """Stack the translated tiles in path back into the original pages, in place."""
+    out = pymupdf.open()
+    with pymupdf.open(path) as tiles:
+        page = None
+        for n, (index, y0, y1) in enumerate(layout):
+            width = tiles[n].rect.width  # double for the dual layout
+            if y0 == 0:
+                height = next(b for i, _, b in reversed(layout) if i == index)
+                page = out.new_page(width=width, height=height)
+            page.show_pdf_page(pymupdf.Rect(0, y0, width, y1), tiles, n)
+        out.set_metadata(tiles.metadata)
+        out.save(path.with_suffix(".stitched.pdf"), garbage=4, deflate=True)
+    os.replace(path.with_suffix(".stitched.pdf"), path)
+
+
 def _merge(parts: list[Path], dest: Path, dpi: int = RESULT_DPI_RANGE[1]):
     out = pymupdf.open()
     for part in parts:
@@ -857,7 +944,7 @@ def format_report(report: dict) -> str:
                  f"质检：{report['pages']} 页，首轮 {report['redone']} 页有问题已重做，"
                  f"最终 {len(report['problems'])} 页仍有问题"]
     for item in report["problems"][:10]:
-        lines.append(f"· 第 {item['page']} 页：" + "；".join(item["issues"])[:150])
+        lines.append(f"· {item.get('label') or '第 %d 页' % item['page']}：" + "；".join(item["issues"])[:150])
     if len(report["problems"]) > 10:
         lines.append(f"· 另有 {len(report['problems']) - 10} 页")
     return "\n".join(lines)
@@ -875,6 +962,10 @@ def process(job: Job, client) -> dict:
     (job.workdir / "cache").mkdir(exist_ok=True)
     if not FONT_DIR.joinpath("SourceHanSansCN-Regular.ttf").exists():
         raise RuntimeError(f"fonts missing in {FONT_DIR}")
+    original = job.source
+    layout = split_long_pages(job)
+    if layout:  # from here on every tile is a page; stitched back at the end
+        job.source = job.workdir / "tiles.pdf"
     job.progress("扶正页面", 2)
     upright, ocr = straighten(job)
     total = len(pymupdf.open(upright))
@@ -910,12 +1001,19 @@ def process(job: Job, client) -> dict:
     elif job.light_qa:
         _light_quality_check(job, client, upright, ocr, tess, total)
 
+    if layout and job.report:  # quality control saw tiles; name them by page and part
+        for item in job.report["problems"]:
+            index = layout[item["page"] - 1][0]
+            part = sum(1 for i, _, _ in layout[:item["page"]] if i == index)
+            item["label"] = f"第 {index + 1} 页第 {part} 块"
     results = {}
-    dpi = source_dpi(job.source)
+    dpi = source_dpi(original)
     for kind in ("dual", "mono"):
         if job.output in (kind, "both"):
             dest = job.workdir / f"result-{kind}.pdf"
             _merge([job.workdir / f"{kind}_{n:04d}.pdf" for n in range(chunk_count)], dest, dpi)
+            if layout:
+                stitch_tiles(dest, layout)
             results[kind] = dest
     return results
 

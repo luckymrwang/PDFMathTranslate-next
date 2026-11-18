@@ -609,6 +609,59 @@ class ScanWorkerTest(unittest.TestCase):
             doc.save(path)
         self.assertEqual(scan_pipeline.source_dpi(path), 300)
 
+    @staticmethod
+    def _long_page(path, blocks=10):
+        """A 400 x 6000 pt page: text blocks 600 pt apart with blank gaps between."""
+        pymupdf = scan_pipeline.pymupdf
+        with pymupdf.open() as doc:
+            page = doc.new_page(width=400, height=600 * blocks)
+            for b in range(blocks):
+                for k in range(8):  # each block is 8 lines, y = 600b + 100 .. 380
+                    page.insert_text((30, 600 * b + 100 + 40 * k), f"block {b} line {k} " * 3, fontsize=14)
+            doc.save(path)
+
+    def test_ordinary_pages_are_not_tiled(self):
+        pymupdf = scan_pipeline.pymupdf
+        with pymupdf.open() as doc:
+            for w, h in ((595, 842), (842, 595), (400, 950)):
+                self.assertEqual(scan_pipeline.tile_cuts(doc.new_page(width=w, height=h)), [], (w, h))
+
+    def test_long_page_is_cut_in_the_gaps_between_text(self):
+        path = self.root / "long.pdf"
+        self._long_page(path)
+        with scan_pipeline.pymupdf.open(path) as doc:
+            cuts = scan_pipeline.tile_cuts(doc[0])
+        self.assertGreater(len(cuts), 5)
+        for cut in cuts:  # text sits at 600b + 85 .. 385; the rest is blank
+            self.assertFalse(85 <= cut % 600 <= 385, cut)
+            self.assertLessEqual(cut - (cuts[cuts.index(cut) - 1] if cuts.index(cut) else 0),
+                                 1.25 * scan_pipeline.TILE_RATIO * 400 + 1)
+
+    def test_tiles_are_stitched_back_into_the_original_page(self):
+        pymupdf = scan_pipeline.pymupdf
+        source = self.root / "long.pdf"
+        self._long_page(source)
+        job = scan_pipeline.Job(source=source, workdir=self.root)
+        layout = scan_pipeline.split_long_pages(job)
+        with pymupdf.open(self.root / "tiles.pdf") as tiles:
+            self.assertEqual(tiles.page_count, len(layout))
+            self.assertTrue(all(abs(t.rect.height - (y1 - y0)) < 0.5 for t, (_, y0, y1) in zip(tiles, layout)))
+            # A dual result: each tile page twice as wide, as _render_chunk builds it.
+            dual = pymupdf.open()
+            for t in tiles:
+                page = dual.new_page(width=t.rect.width * 2, height=t.rect.height)
+                page.show_pdf_page(pymupdf.Rect(0, 0, t.rect.width, t.rect.height), tiles, t.number)
+                page.show_pdf_page(pymupdf.Rect(t.rect.width, 0, t.rect.width * 2, t.rect.height), tiles, t.number)
+            dest = self.root / "result-dual.pdf"
+            dual.save(dest)
+        scan_pipeline.stitch_tiles(dest, layout)
+        with pymupdf.open(dest) as out:
+            self.assertEqual(out.page_count, 1)
+            self.assertEqual((round(out[0].rect.width), round(out[0].rect.height)), (800, 6000))
+            hit = out[0].search_for("block 7 line 3")
+            self.assertTrue(hit)
+            self.assertAlmostEqual(hit[0].y1, 600 * 7 + 100 + 40 * 3, delta=6)  # back in place
+
     def test_pause_seconds_reads_reset_time(self):
         later = (datetime.datetime.now() + datetime.timedelta(minutes=30)).strftime("%H:%M")
         seconds = scan_worker.pause_seconds(f"not asked again before {later} UTC+8")
