@@ -190,6 +190,15 @@ async function run() {
   home.applyWallet({ points_balance: 100 })
   assert.equal(home.data.paymentTotal, '0.00', 'Wallet refresh updates an open uncreated quote')
   home.applyWallet({ points_balance: 0 })
+  // The home card's daily total adds every rewarded video, but only where videos can play.
+  const savedAd = home.videoAd
+  home.videoAd = null
+  home.applyWallet({ points_balance: 0, daily_reward: 20, ad_reward: 20, ad_limit: 5, daily_limit: 300 })
+  assert.equal(home.data.dailyMax, 20, 'No video ad: only the daily claim')
+  home.videoAd = { show() {} }
+  home.applyWallet({ points_balance: 0, daily_reward: 20, ad_reward: 20, ad_limit: 5, daily_limit: 300 })
+  assert.equal(home.data.dailyMax, 120, '20 + 5 videos x 20')
+  home.videoAd = savedAd
 
   // Upgrade sheet: credit the trial pages, switch engines, and send the trial to the gateway.
   Object.assign(home.data, { engines: ['DeepSeek-V4.1-Flash', 'GPT-5.6', 'GPT-6'], engine: 'GPT-6', mode: 'enhanced', pageCount: 12, sourceIndex: 2, targetIndex: 0 })
