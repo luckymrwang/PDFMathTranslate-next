@@ -214,7 +214,7 @@ const pointsBalanceLimit = 300
 const pointsReward = 100
 
 // dailyClaimReward is the free daily claim; invitations keep pointsReward.
-const dailyClaimReward = 50
+const dailyClaimReward = 20
 
 // Rewarded video ads add points on top of the daily claim and share its daily
 // and balance caps. WeChat offers no server-side proof that an ad was watched,
