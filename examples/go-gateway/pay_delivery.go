@@ -289,10 +289,11 @@ func adoptHint(order PayOrder) string {
 		macCommand("adopt "+order.ID)
 }
 
-// macCommand formats a scan_worker.py command for the operator's Mac, where
-// the repository lives at ~/Documents/www/python3/PDFMathTranslate-next.
+// macCommand formats a scan_worker.py command for the operator's Mac. It runs
+// the installed worker copy with the conda Python the launchd agent uses: the
+// system python3 lacks pymupdf, so the old "cd repo && python3 ..." line failed.
 func macCommand(args string) string {
-	return "cd ~/Documents/www/python3/PDFMathTranslate-next/examples/mac-scan-worker && python3 scan_worker.py " + args
+	return "~/miniconda3/envs/babeldoc/bin/python ~/pdf-tools/pdfmath-scan-worker/scan_worker.py " + args
 }
 
 // pointsOnly orders are paid entirely with points; a failure gives the points back
