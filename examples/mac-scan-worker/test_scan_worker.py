@@ -737,6 +737,45 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertTrue(scan_pipeline._quota_error(Exception("The usage limit has been reached")))
         self.assertFalse(scan_pipeline._quota_error(Exception("connection reset")))
 
+    def test_vertical_text_fills_columns_right_to_left(self):
+        Rect = scan_pipeline.pymupdf.Rect  # noqa: N806 - reads like the class
+        columns = [Rect(300, 100, 312, 180), Rect(285, 100, 297, 170)]  # two manga columns
+        fs, placed = scan_pipeline.vertical_layout(columns[0] | columns[1], columns, "我不太明白，为什么？")
+        self.assertAlmostEqual(fs, 0.95 * 12, delta=0.01)  # sized by column width, not squeezed
+        self.assertEqual("".join(c for c, _, _ in placed), "我不太明白︐为什么︖")  # vertical punctuation
+        xs = sorted({round(x) for _, x, _ in placed}, reverse=True)
+        self.assertEqual(len(xs), 2)
+        self.assertEqual([round(x) for _, x, _ in placed[:2]], [xs[0], xs[0]])  # first column is the right one
+        self.assertLess(placed[1][2] - placed[0][2], 1.2 * fs)  # characters go down the column
+        self.assertTrue(all(100 <= top <= 180 for _, _, top in placed))
+
+    def test_long_vertical_translation_runs_into_extra_columns_not_tiny_text(self):
+        column = scan_pipeline.pymupdf.Rect(100, 100, 111, 143)
+        fs, placed = scan_pipeline.vertical_layout(column, [column], "……勇利？你怎么了？")
+        self.assertGreaterEqual(fs, 0.8 * 0.95 * 11)
+        self.assertGreater(len({round(x) for _, x, _ in placed}), 1)
+
+    def test_vertical_groups_are_written_as_columns(self):
+        if not (scan_pipeline.FONT_DIR / "SourceHanSansCN-Regular.ttf").exists():
+            self.skipTest("Source Han fonts not installed")
+        Rect = scan_pipeline.pymupdf.Rect  # noqa: N806 - reads like the class
+        doc = scan_pipeline.pymupdf.open()
+        doc.new_page(width=400, height=400)
+        lines = [{"bbox": Rect(300, 100, 312, 190), "text": "ユウリの照れる", "words": []},
+                 {"bbox": Rect(285, 100, 297, 180), "text": "ポイントって", "words": []},
+                 {"bbox": Rect(40, 40, 200, 52), "text": "横書きの説明文です", "words": []}]
+        result = {"groups": [{"ids": [0, 1], "tr": "我不太明白勇利害羞的点"},
+                             {"ids": [2], "tr": "横排说明文字"}]}
+        archive = scan_pipeline.pymupdf.Archive(str(scan_pipeline.FONT_DIR))
+        out, info = scan_pipeline.render_translation(doc, 0, lines, result, archive, "SourceHanSansCN")
+        self.assertGreater(info[0]["fs"], 10)  # was ~1pt: squeezed horizontally into the columns
+        self.assertGreater(info[1]["fs"], 10)
+        chars = [s for b in out[0].get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]
+                 if s["text"].strip() and s["bbox"][0] > 250]
+        self.assertGreaterEqual(len(chars), 10)
+        self.assertTrue(all(s["bbox"][2] - s["bbox"][0] < 15 for s in chars), "one character per row")
+        self.assertIn("横排说明文字", out[0].get_text())
+
 
 if __name__ == "__main__":
     unittest.main()

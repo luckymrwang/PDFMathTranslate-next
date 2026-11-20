@@ -623,6 +623,75 @@ def _colours(pix: pymupdf.Pixmap, rect: pymupdf.Rect):
     return tuple(c / 255 for c in bg), tuple(c / 255 for c in fg)
 
 
+# Vertical writing: Japanese manga and some Chinese labels are set top to bottom in
+# columns read right to left. OCR gives each column as a tall, narrow "line"; written
+# horizontally into that box the translation shrinks to a few pixels (a manga balloon
+# came out blank), so such groups are written back as columns.
+VERTICAL_FORMS = str.maketrans({
+    "，": "︐", "、": "︑", "。": "︒", "：": "︓", "；": "︔", "！": "︕", "？": "︖", "!": "︕", "?": "︖",
+    "…": "︙", "⋯": "︙", "—": "︱", "–": "︲", "~": "︴", "～": "︴", "ー": "丨",
+    "（": "︵", "）": "︶", "(": "︵", ")": "︶", "「": "﹁", "」": "﹂", "『": "﹃", "』": "﹄",
+    "《": "︽", "》": "︾", "〈": "︿", "〉": "﹀", "【": "︻", "】": "︼", "“": "﹁", "”": "﹂"})
+LINE_ADVANCE = 1.05  # character pitch down a column, in font sizes
+COLUMN_GAP = 0.25  # extra space between columns, in font sizes
+
+
+def _vertical(line: dict) -> bool:
+    """An OCR line that is a column of CJK text (tall and narrow)."""
+    box = line["bbox"]
+    return box.height >= 2 * box.width and len(_CJK.findall(line["text"])) >= 2
+
+
+def vertical_layout(rect: pymupdf.Rect, columns: list[pymupdf.Rect], text: str) -> tuple[float, list[tuple]]:
+    """Place text in right-to-left columns over rect; returns (font size, [(char, x centre, top)]).
+
+    The font size follows the source columns' width, the way it follows line height in
+    horizontal text. When the translation does not fit, the size shrinks a little and
+    then the text runs into extra columns to the left (balloon space), so it never
+    turns unreadably small.
+    """
+    chars = [c for c in text.translate(VERTICAL_FORMS) if not c.isspace()]
+    widths = sorted(c.width for c in columns)
+    target = 0.95 * widths[len(widths) // 2]
+    centres = sorted(((c.x0 + c.x1) / 2 for c in columns), reverse=True)
+    pitch = (statistics.median(a - b for a, b in zip(centres, centres[1:], strict=False))
+             if len(centres) > 1 else (1 + COLUMN_GAP) * target)
+
+    def fit(fs):
+        per_column = max(1, int(rect.height / (LINE_ADVANCE * fs)))
+        return per_column, -(-len(chars) // per_column)
+
+    fs = target
+    per_column, needed = fit(fs)
+    room = len(columns)
+    while needed > room and 0.95 * fs >= 0.8 * target:
+        fs *= 0.95
+        per_column, needed = fit(fs)
+    step = max(pitch, (1 + COLUMN_GAP) * fs)
+    if needed <= room:  # fewer columns than the source: keep them centred over its columns
+        right = (centres[0] + centres[room - 1]) / 2 + step * (needed - 1) / 2
+    else:
+        right = centres[0]
+    placed = []
+    for n, ch in enumerate(chars):
+        col, row = divmod(n, per_column)
+        placed.append((ch, right - col * step, rect.y0 + row * LINE_ADVANCE * fs))
+    return fs, placed
+
+
+def _write_vertical(page: pymupdf.Page, rect, columns, text, colour, font: str) -> float:
+    fs, placed = vertical_layout(rect, columns, text)
+    weight = "Bold" if fs > 14 else "Regular"
+    path = str(FONT_DIR / f"{font}-{weight}.ttf")
+    name = f"v{weight[0]}"
+    face = pymupdf.Font(fontfile=path)
+    page.insert_font(fontname=name, fontfile=path)
+    for ch, centre, top in placed:
+        width = face.text_length(ch, fontsize=fs)
+        page.insert_text((centre - width / 2, top + 0.88 * fs), ch, fontsize=fs, fontname=name, color=colour)
+    return fs
+
+
 def render_translation(doc: pymupdf.Document, index: int, lines, result, archive, font: str):
     """Return (one-page PDF with the translation, per-group layout info for checks)."""
     out = pymupdf.open()
@@ -630,7 +699,8 @@ def render_translation(doc: pymupdf.Document, index: int, lines, result, archive
     page = out[0]
     pix = doc[index].get_pixmap(dpi=DPI)
     used, jobs, info_ids, info = set(), [], [], []
-    typical = statistics.median(l["bbox"].height for l in lines) if lines else 10
+    upright = [l for l in lines if not _vertical(l)] or lines  # columns' heights are not text size
+    typical = statistics.median(l["bbox"].height for l in upright) if upright else 10
     for g in result.get("groups", []):
         try:
             ids = [int(i) for i in g.get("ids", [])]
@@ -641,6 +711,16 @@ def render_translation(doc: pymupdf.Document, index: int, lines, result, archive
         if not ids or not text:
             continue
         used.update(ids)
+        if sum(_vertical(lines[i]) for i in ids) * 2 > len(ids):
+            # Columns: covered whole, so cover_box's trimming of icons beside a label is skipped.
+            boxes = [pymupdf.Rect(lines[i]["bbox"]) for i in ids]
+            rect = pymupdf.Rect(boxes[0])
+            for box in boxes[1:]:
+                rect |= box
+            width = statistics.median(b.width for b in boxes)
+            jobs.append((rect, width, 0.95 * width, text, boxes, True))
+            info_ids.append(ids)
+            continue
         cover = [cover_box(lines[i], text, typical) for i in ids]
         rect = pymupdf.Rect(cover[0][0])
         for box, _ in cover[1:]:
@@ -657,21 +737,27 @@ def render_translation(doc: pymupdf.Document, index: int, lines, result, archive
             else:
                 est.append(min(by_height, by_width))
         jobs.append((rect, statistics.median(lines[i]["bbox"].height for i in ids),
-                     statistics.median(est), text, [box for box, _ in cover]))
+                     statistics.median(est), text, [box for box, _ in cover], False))
         info_ids.append(ids)
     if jobs:
-        body = [j[2] for j in jobs if j[1] < 1.5 * typical]
+        body = [j[2] for j in jobs if j[1] < 1.5 * typical and not j[5]]
         if body:
             cap = 1.15 * statistics.median(body)
-            jobs = [(r, lh, min(fs, cap) if lh < 1.5 * typical else fs, t, b) for r, lh, fs, t, b in jobs]
-    for rect, lh, _fs, _text, boxes in jobs:  # cover first so later text is never painted over
+            jobs = [(r, lh, min(fs, cap) if lh < 1.5 * typical and not v else fs, t, b, v)
+                    for r, lh, fs, t, b, v in jobs]
+    # lh is the text size across the writing direction: line height, or column width.
+    for rect, lh, _fs, _text, boxes, _v in jobs:  # cover first so later text is never painted over
         bg, _ = _colours(pix, rect)
         for b in boxes:
             pad_x, pad_y = 0.12 * lh, 0.15 * lh  # tight, so table borders survive
             page.draw_rect(pymupdf.Rect(b.x0 - pad_x, b.y0 - pad_y, b.x1 + pad_x, b.y1 + pad_y),
                            color=None, fill=bg, overlay=True)
-    for n, (rect, lh, fs, text, _boxes) in enumerate(jobs):
+    for n, (rect, lh, fs, text, boxes, vertical) in enumerate(jobs):
         _, fg = _colours(pix, rect)
+        if vertical:
+            size = _write_vertical(page, rect, boxes, text, fg, font)
+            info.append({"ids": info_ids[n], "fs": round(size, 1), "scale": round(size / fs, 2)})
+            continue
         colour = "".join(f"{int(c * 255):02x}" for c in fg)
         bold = "bold" if fs > 14 else "normal"
         css = (f"@font-face {{font-family: f; src: url({font}-Regular.ttf);}}"
