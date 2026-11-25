@@ -30,6 +30,15 @@ type azureWatch struct {
 	since int64
 }
 
+// azureWatches holds one azureWatch per translation API client. It is not a Server
+// field because the LAN image builds this package with its own Server type.
+var azureWatches sync.Map
+
+func watchFor(c *Pdf2zhClient) *azureWatch {
+	w, _ := azureWatches.LoadOrStore(c, &azureWatch{})
+	return w.(*azureWatch)
+}
+
 // azureAlertFresh is how recent an outage must be to be announced after a gateway
 // restart; an older one was already reported by the process that saw it start.
 const azureAlertFresh = time.Hour
@@ -74,7 +83,7 @@ func (s *Server) watchAzure(ctx context.Context, now time.Time) {
 		health.State = "ok"
 	}
 
-	w := &s.azure
+	w := watchFor(s.pdf2zh)
 	w.mu.Lock()
 	first := !w.seen
 	was, wasSince := w.state, w.since
