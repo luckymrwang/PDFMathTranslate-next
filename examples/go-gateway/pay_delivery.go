@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -586,6 +587,7 @@ func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order Pa
 				return true
 			}
 			defer resp.Body.Close()
+			s.recordDownload(r, order.ID)
 			w.Header().Set("Content-Type", "application/pdf")
 			w.Header().Set("Content-Disposition", filename)
 			if resp.ContentLength >= 0 {
@@ -605,6 +607,7 @@ func (s *Server) handlePaidTask(w http.ResponseWriter, r *http.Request, order Pa
 			writeError(w, http.StatusNotFound, sub+" PDF not available")
 			return true
 		}
+		s.recordDownload(r, order.ID)
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", filename)
 		http.ServeContent(w, r, "", info.ModTime(), file)
@@ -710,7 +713,28 @@ func (s *Server) writePaidResult(w http.ResponseWriter, r *http.Request, order P
 			return
 		}
 	}
+	s.recordDownload(r, order.ID) // the client downloads from these links directly
 	s.writeResultURLs(w, order.MonoKey, order.DualKey)
+}
+
+// recordDownload notes that the customer fetched a result. It never fails the download.
+// A resumed or ranged request that does not start at byte 0 continues an earlier one.
+func (s *Server) recordDownload(r *http.Request, id string) {
+	if spec := r.Header.Get("Range"); spec != "" && !strings.HasPrefix(spec, "bytes=0-") {
+		return
+	}
+	now := time.Now().Unix()
+	err := s.pay.store.update(id, func(o *PayOrder) error {
+		if o.FirstDownloadAt == 0 {
+			o.FirstDownloadAt = now
+		}
+		o.LastDownloadAt = now
+		o.Downloads++
+		return nil
+	})
+	if err != nil {
+		log.Printf("download not recorded (order=%s): %v", id, err)
+	}
 }
 
 func (s *Server) uploadResult(ctx context.Context, path, key string) (string, error) {

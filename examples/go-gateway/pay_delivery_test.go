@@ -258,6 +258,72 @@ func TestUnflaggedScanOnGPTGoesToScanWorker(t *testing.T) {
 	}
 }
 
+func TestDownloadsAreRecordedForSupport(t *testing.T) {
+	s := testPayServer(t)
+	order := paidOrderFixture(t, s, "Tdl", "task-d", 0)
+	mono := filepath.Join(s.pay.store.dir, "uploads", "Tdl-mono.pdf")
+	if err := os.WriteFile(mono, []byte("%PDF-mono-content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pay.store.update(order.ID, func(o *PayOrder) error {
+		o.Delivery, o.MonoFile = "archived", mono
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	get := func(path, user string, header map[string]string) int {
+		req := ownRequest("GET", path, user, nil)
+		for k, v := range header {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		s.handleTranslateTask(w, req)
+		return w.Code
+	}
+	state := func() PayOrder { o, _ := s.pay.store.get(order.ID); return o }
+
+	if o := state(); o.FirstDownloadAt != 0 || o.Downloads != 0 {
+		t.Fatalf("a delivered order nobody fetched must show no download: %+v", o)
+	}
+	// Looking at the status or at someone else's order is not a download.
+	get("/api/translate/task-d", "owner", nil)
+	get("/api/translate/task-d/mono", "other", nil)
+	if o := state(); o.Downloads != 0 {
+		t.Fatalf("non-downloads were counted: %+v", o)
+	}
+
+	if code := get("/api/translate/task-d/mono", "owner", nil); code != 200 {
+		t.Fatalf("download failed: %d", code)
+	}
+	first := state()
+	if first.Downloads != 1 || first.FirstDownloadAt == 0 || first.LastDownloadAt != first.FirstDownloadAt {
+		t.Fatalf("first download not recorded: %+v", first)
+	}
+	// A resumed range continues the same download; a fresh one counts again and keeps the first time.
+	get("/api/translate/task-d/mono", "owner", map[string]string{"Range": "bytes=5-"})
+	if o := state(); o.Downloads != 1 {
+		t.Fatalf("resumed range counted as a new download: %+v", o)
+	}
+	if err := s.pay.store.update(order.ID, func(o *PayOrder) error { o.FirstDownloadAt -= 100; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	get("/api/translate/task-d/mono", "owner", nil)
+	again := state()
+	if again.Downloads != 2 || again.FirstDownloadAt != first.FirstDownloadAt-100 || again.LastDownloadAt < first.LastDownloadAt {
+		t.Fatalf("second download changed the first-download time: %+v", again)
+	}
+	// A failed download (file missing) is not recorded.
+	if err := os.Remove(mono); err != nil {
+		t.Fatal(err)
+	}
+	if code := get("/api/translate/task-d/mono", "owner", nil); code != 404 {
+		t.Fatalf("expected 404, got %d", code)
+	}
+	if o := state(); o.Downloads != 2 {
+		t.Fatalf("failed download counted: %+v", o)
+	}
+}
+
 func TestCancelledOrderHiddenButLatePaymentRevives(t *testing.T) {
 	s := testPayServer(t)
 	var paid sync.Mutex

@@ -235,6 +235,11 @@ type PayOrder struct {
 	TaskHistory        []string
 	MonoFile, DualFile string
 	MonoKey, DualKey   string
+	// FirstDownloadAt/LastDownloadAt (unix seconds) and Downloads record when the customer
+	// fetched the result, so support can tell whether a delivered order was ever taken.
+	// Zero means never. Previews are not downloads.
+	FirstDownloadAt, LastDownloadAt int64
+	Downloads                       int
 }
 
 // PageCount returns the document's page count, falling back to Quantity for older orders.
