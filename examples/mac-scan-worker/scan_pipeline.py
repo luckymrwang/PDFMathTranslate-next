@@ -398,9 +398,60 @@ def cover_box(line: dict, translation: str, typical: float) -> tuple[pymupdf.Rec
 
 
 def _overlaps(a: pymupdf.Rect, b: pymupdf.Rect) -> bool:
-    v = min(a.y1, b.y1) - max(a.y0, b.y0)
+    """Whether two line boxes cover the same text line.
+
+    Tesseract boxes are often taller than Apple's for the same line (they take in the
+    row's padding), so the overlap alone can fall just short; boxes on one text line
+    also have their vertical centres close compared with their height.
+    """
     h = min(a.x1, b.x1) - max(a.x0, b.x0)
-    return v > 0.4 * min(a.height, b.height) and h > 0.3 * min(a.width, b.width)
+    if h <= 0.3 * min(a.width, b.width):
+        return False
+    v = min(a.y1, b.y1) - max(a.y0, b.y0)
+    if v > 0.4 * min(a.height, b.height):
+        return True
+    return v > 0 and abs((a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2) < 0.75 * max(a.height, b.height)
+
+
+def _split_cells(line: dict) -> list[dict]:
+    """Cut a Tesseract line at its table-cell separators ("|"), one line per cell.
+
+    Tesseract reads a table row as one line with the cell borders turned into "|",
+    which would be translated as one sentence and written across the borders.
+    """
+    words = line.get("words") or []
+    if not any("|" in w for w, _ in words):
+        return [line]
+    cells, current = [], []
+    for word, rect in words:
+        if word.startswith("|") and current:
+            cells.append(current)
+            current = []
+        clean = word.strip("|").strip()
+        if clean:
+            current.append((clean, rect))
+        if word.endswith("|") and current:
+            cells.append(current)
+            current = []
+    cells.append(current)
+    return [{"bbox": pymupdf.Rect(min(r.x0 for _, r in c), line["bbox"].y0, max(r.x1 for _, r in c), line["bbox"].y1),
+             "text": " ".join(w for w, _ in c), "words": c, "cell": True}
+            for c in cells if c]
+
+
+def _fit_height(line: dict, typical: float) -> dict:
+    """Trim a Tesseract line taller than the page's Apple lines to their height.
+
+    The font size and the cover over the original follow a line's height, so a box
+    nearly twice as tall as its neighbours wrote the translation twice as large and
+    painted over the table borders around it.
+    """
+    box = line["bbox"]
+    limit = 1.25 * typical
+    if box.height <= limit:
+        return line
+    mid = (box.y0 + box.y1) / 2
+    return {**line, "bbox": pymupdf.Rect(box.x0, mid - limit / 2, box.x1, mid + limit / 2)}
 
 
 def ocr_lines(page: pymupdf.Page, backup: pymupdf.Page | None = None) -> list[dict]:
@@ -415,8 +466,12 @@ def ocr_lines(page: pymupdf.Page, backup: pymupdf.Page | None = None) -> list[di
         lines = _blank_lines(page)  # Apple OCR skipped the page; read from a crop instead
     if backup is not None:
         found = [l["bbox"] for l in lines]
-        extra = [l for l in _page_lines(backup)
-                 if len(re.findall(r"[^\W\d_]{2,}", l["text"])) >= 2
+        typical = statistics.median(b.height for b in found) if len(found) >= 5 else None
+        cells = [cell for l in _page_lines(backup) for cell in _split_cells(l)]
+        # A table cell is often one word ("SHELL", "HEAD"), so a cell needs only a real word.
+        extra = [_fit_height(l, typical) if typical else l for l in cells
+                 if (len(re.findall(r"[^\W\d_]{2,}", l["text"])) >= 2
+                     or (l.get("cell") and re.search(r"[^\W\d_]{3,}", l["text"])))
                  and not any(_overlaps(l["bbox"], b) for b in found)]
         if extra:
             lines = sorted(lines + extra, key=lambda l: (round(l["bbox"].y0 / 4), l["bbox"].x0))

@@ -820,6 +820,37 @@ class NormalizeTechnicalTest(unittest.TestCase):
         self.assertTrue(any(t.startswith("NB/T47003.1-2022") for t in texts), texts)
         self.assertTrue(any(t.startswith("Pipe ⌀48×4") for t in texts), texts)
 
+    def test_tesseract_row_is_split_at_table_borders(self):
+        Rect = scan_pipeline.pymupdf.Rect  # noqa: N806 - reads like the class
+        row = {"bbox": Rect(688, 175, 802, 184), "text": "A | SHELL | RT-10% |NB/T47013. 2-2015|",
+               "words": [("A", Rect(688, 175, 693, 184)), ("|", Rect(695, 175, 697, 184)),
+                         ("SHELL", Rect(700, 175, 724, 184)), ("|", Rect(726, 175, 728, 184)),
+                         ("RT-10%", Rect(730, 175, 752, 184)), ("|NB/T47013.", Rect(754, 175, 785, 184)),
+                         ("2-2015|", Rect(786, 175, 802, 184))]}
+        cells = scan_pipeline._split_cells(row)
+        self.assertEqual([c["text"] for c in cells], ["A", "SHELL", "RT-10%", "NB/T47013. 2-2015"])
+        self.assertEqual(cells[3]["bbox"], Rect(754, 175, 802, 184))
+        plain = {"bbox": Rect(0, 0, 50, 10), "text": "no borders", "words": [("no", Rect(0, 0, 20, 10))]}
+        self.assertEqual(scan_pipeline._split_cells(plain), [plain])
+
+    def test_tesseract_lines_are_trimmed_to_the_height_of_apples(self):
+        Rect = scan_pipeline.pymupdf.Rect  # noqa: N806 - reads like the class
+        tall = {"bbox": Rect(100, 130, 160, 140), "text": "DESIGN TEMPERATURE", "words": []}
+        trimmed = scan_pipeline._fit_height(tall, 4.3)
+        self.assertAlmostEqual(trimmed["bbox"].height, 1.25 * 4.3, places=3)
+        self.assertAlmostEqual((trimmed["bbox"].y0 + trimmed["bbox"].y1) / 2, 135, places=3)  # same centre
+        self.assertEqual((trimmed["bbox"].x0, trimmed["bbox"].x1), (100, 160))
+        short = {"bbox": Rect(100, 130, 160, 135), "text": "ok", "words": []}
+        self.assertIs(scan_pipeline._fit_height(short, 4.3), short)
+
+    def test_taller_tesseract_box_on_the_same_line_is_a_duplicate(self):
+        Rect = scan_pipeline.pymupdf.Rect  # noqa: N806 - reads like the class
+        apple = Rect(568.3, 137.4, 615.0, 144.5)
+        tess = Rect(571.3, 131.9, 615.9, 139.9)  # same label, but 8pt tall and higher
+        self.assertTrue(scan_pipeline._overlaps(tess, apple))
+        self.assertFalse(scan_pipeline._overlaps(Rect(571, 152, 615, 160), apple), "the next row is not a duplicate")
+        self.assertFalse(scan_pipeline._overlaps(Rect(660, 133, 700, 141), apple), "another column is not either")
+
 
 if __name__ == "__main__":
     unittest.main()
