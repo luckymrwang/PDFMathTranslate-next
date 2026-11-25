@@ -69,6 +69,7 @@ SYSTEM = """你是专业的文档译者。用户会发来一页扫描文档的�
 翻译要求：
 - OCR 可能有错字，以图片为准纠正后再翻译。
 - 数字、金额、日期、期限、条款编号、交叉引用、公式、变量名、代码、单位必须与图片完全一致。
+- 图纸上的规格尺寸和标准号（如 ⌀48×4、M20×80、NB/T 47003.1-2022）逐字符对照图片核对：直径符号写成 ⌀，不要读成数字 0 或 8；标准号中的 T 不能丢；拿不准就保持 OCR 原样，不要猜。
 - """ + NAME_RULE + """
 - 使用该领域规范术语，译文简洁，长度尽量不超过原文所占空间。不要用括号附注原文。"""
 # autocorrect-enable
@@ -337,6 +338,24 @@ def _page_lines(page: pymupdf.Page) -> list[dict]:
     return lines
 
 
+# OCR misreads of engineering drawings. Apple OCR turns the diameter sign into a digit
+# ("Pipe ⌀48x4" -> "Pipe 048X4", "⌀219x6.5" -> "8219x6.5") and the T of a Chinese
+# standard number into a 1 ("NB/T 47003.1" -> "NB/147003.1"). Both change what the part is.
+_STANDARD_T = re.compile(r"\b(NB|HG|JB|SH|YB|SY|HJ)\s*/\s*[1lI|](?=\s?\d{4,5}\b)")
+_PIPE_SIZE = re.compile(
+    r"(?i)(?<![a-z])(pipe|tube|管)(\s*)[0O8](?=\d{2,3}\s*[xX×*]\s*\d{1,2}(?:\.\d+)?(?!\d))")
+_DIAMETER_SIGN = re.compile(r"[ΦφØø](?=\d)")
+_SIZE_TIMES = re.compile(r"(?<=[⌀M])(\d{1,4})\s*[xX*]\s*(?=\d)")
+
+
+def normalize_technical(text: str) -> str:
+    """Repair the OCR misreads that change a drawing's standard numbers and pipe sizes."""
+    text = _STANDARD_T.sub(lambda m: f"{m.group(1)}/T", text)
+    text = _PIPE_SIZE.sub(lambda m: f"{m.group(1)}{m.group(2)}⌀", text)
+    text = _DIAMETER_SIGN.sub("⌀", text)
+    return _SIZE_TIMES.sub(lambda m: f"{m.group(1)}×", text)
+
+
 def _letters(token: str) -> int:
     return len(re.findall(r"[^\W\d_]", token))
 
@@ -401,6 +420,8 @@ def ocr_lines(page: pymupdf.Page, backup: pymupdf.Page | None = None) -> list[di
                  and not any(_overlaps(l["bbox"], b) for b in found)]
         if extra:
             lines = sorted(lines + extra, key=lambda l: (round(l["bbox"].y0 / 4), l["bbox"].x0))
+    for line in lines:
+        line["text"] = normalize_technical(line["text"])
     return lines
 
 
@@ -556,6 +577,9 @@ def translate_page(job: Job, client, upright_path: Path, ocr_path: Path, index: 
         result = _ask_model(job, client, page, image, items, index, redo)
         groups = [g for g in result["groups"] if isinstance(g, dict)]
         for g in groups:
+            for key in ("tr", "zh"):
+                if isinstance(g.get(key), str):
+                    g[key] = normalize_technical(g[key])
             g["ids"] = [i for i in g.get("ids", []) if isinstance(i, int) and 0 <= i < len(lines)]
         taken = {i for g in groups for i in g["ids"]}
         # Lines the model deliberately left alone (logos etc.) are neither orphans nor leftovers.

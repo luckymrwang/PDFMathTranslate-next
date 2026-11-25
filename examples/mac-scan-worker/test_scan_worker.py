@@ -777,5 +777,49 @@ class ScanWorkerTest(unittest.TestCase):
         self.assertIn("横排说明文字", out[0].get_text())
 
 
+class NormalizeTechnicalTest(unittest.TestCase):
+    """OCR misreads that change a drawing's part sizes and standard numbers."""
+
+    def check(self, source, expected):
+        self.assertEqual(scan_pipeline.normalize_technical(source), expected)
+
+    def test_standard_number_keeps_its_t(self):
+        self.check("1.NB/147003.1-2022", "1.NB/T47003.1-2022")
+        self.check("NB/1 47003.2-2022", "NB/T 47003.2-2022")
+        self.check("HG/120592-2009", "HG/T20592-2009")
+
+    def test_standard_numbers_already_right_are_untouched(self):
+        for text in ("NB/T 47003.1-2022", "HG/T 20592-2009", "GB/T 14976-2012", "GB/12345", "JB/T4730.1-2005"):
+            self.check(text, text)
+
+    def test_pipe_size_diameter_sign_read_as_digit(self):
+        self.check("Pipe 048X4", "Pipe ⌀48×4")
+        self.check("Pipe 8219x6.5", "Pipe ⌀219×6.5")
+        self.check("管 8219x6.5", "管 ⌀219×6.5")
+        # autocorrect-disable  # OCR output has no space between 管 and the size
+        self.check("管8273X6.5", "管⌀273×6.5")
+        # autocorrect-enable
+
+    def test_diameter_letters_and_times_signs(self):
+        self.check("Φ4600", "⌀4600")
+        self.check("Ø48x4", "⌀48×4")
+        self.check("Bolt M20X80", "Bolt M20×80")
+        self.check("螺栓 M16*60", "螺栓 M16×60")
+
+    def test_ordinary_text_and_numbers_are_untouched(self):
+        for text in ("Pipe assembly", "Level gauge takeover", "Nut M16", "L=2114", "2400", "50 x 4 steel",
+                     "tee 800x600", "WORKING FLUID", "DN4600×6500", "1:30", "ACF"):
+            self.check(text, text)
+
+    def test_ocr_lines_are_cleaned_before_translation(self):
+        doc = scan_pipeline.pymupdf.open()
+        page = doc.new_page(width=300, height=200)
+        page.insert_text((20, 40), "NB/147003.1-2022 Atmospheric pressure vessels", fontsize=10)
+        page.insert_text((20, 80), "Pipe 048X4 Spare", fontsize=10)
+        texts = [line["text"] for line in scan_pipeline.ocr_lines(page)]
+        self.assertTrue(any(t.startswith("NB/T47003.1-2022") for t in texts), texts)
+        self.assertTrue(any(t.startswith("Pipe ⌀48×4") for t in texts), texts)
+
+
 if __name__ == "__main__":
     unittest.main()
