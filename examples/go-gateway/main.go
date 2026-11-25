@@ -31,6 +31,8 @@ type Server struct {
 	scanReason                                atomic.Value
 	scanSig                                   scanSignal
 	scanReminded                              sync.Map
+	// azure remembers whether the operator was told that the Azure engine fell back.
+	azure azureWatch
 }
 
 func main() {

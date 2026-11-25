@@ -785,6 +785,7 @@ func (s *Server) runPayReconciliation(ctx context.Context) {
 			}
 		}
 		s.reconcileScanQueue()
+		s.watchAzure(ctx, time.Now())
 		reportDay = s.maybeDailyReport(time.Now(), reportDay)
 	}
 	recoverOrders()

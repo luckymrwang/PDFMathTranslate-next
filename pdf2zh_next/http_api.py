@@ -348,6 +348,16 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="pdf2zh_next HTTP API", version="1.0.0", lifespan=_lifespan)
 
 
+def _azure_status() -> dict[str, Any]:
+    """Whether the Azure engine is serving or has fallen back to Bing (see azure.py)."""
+    try:
+        from pdf2zh_next.translator.translator_impl.azure import fallback_status
+
+        return fallback_status()
+    except Exception:  # health must answer even if the engine cannot be imported
+        return {"state": "ok"}
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -355,6 +365,7 @@ async def health() -> dict[str, Any]:
         "active_tasks": sum(1 for t in _tasks.values() if not t.done),
         "total_tasks": len(_tasks),
         "max_concurrent": MAX_CONCURRENT,
+        "azure": _azure_status(),
     }
 
 

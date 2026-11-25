@@ -52,7 +52,9 @@ def _no_sleep(_seconds):
 
 
 @pytest.fixture(autouse=True)
-def _fast(monkeypatch):
+def _fast(monkeypatch, tmp_path):
+    monkeypatch.setenv("AZURE_STATE_FILE", str(tmp_path / "azure-state.json"))
+    monkeypatch.setattr(azure_module, "_last_recovery_check", 0.0)
     azure_module._reset_block()
     monkeypatch.setattr(BingTranslator._translate_chunk.retry, "sleep", _no_sleep)
     monkeypatch.setattr(AzureTranslator._azure_translate.retry, "sleep", _no_sleep)
@@ -185,3 +187,47 @@ def test_without_fallback_errors_surface(monkeypatch):
     with pytest.raises(azure_module.AzureUnavailableError):
         translator.do_translate("a")
     assert bing_calls == []
+
+
+def test_outage_is_recorded_once_with_its_status(monkeypatch):
+    assert azure_module.fallback_status() == {"state": "ok"}
+    translator, _, _ = _azure(
+        monkeypatch,
+        [FakeResponse(status=403, text="free quota exceeded")],
+        [_bing_ok(), _bing_ok()],
+    )
+    translator.do_translate("a")
+    status = azure_module.fallback_status()
+    assert status["state"] == "fallback"
+    assert status["status"] == 403
+    assert "free quota exceeded" in status["reason"]
+    began = status["since"]
+
+    # The block ends and Azure refuses again: still the same outage, same start time.
+    azure_module._reset_block()
+    translator, _, _ = _azure(monkeypatch, [FakeResponse(status=403)], [_bing_ok()])
+    translator.do_translate("b")
+    assert azure_module.fallback_status()["since"] == began
+
+
+def test_throttling_is_not_reported_as_an_outage(monkeypatch):
+    translator, _, _ = _azure(monkeypatch, [FakeResponse(status=429)], [_bing_ok()])
+    assert translator.do_translate("a") == "bing"
+    assert azure_module.fallback_status() == {"state": "ok"}
+
+
+def test_outage_ends_when_azure_answers_again(monkeypatch):
+    translator, _, _ = _azure(monkeypatch, [FakeResponse(status=403)], [_bing_ok()])
+    translator.do_translate("a")
+    assert azure_module.fallback_status()["state"] == "fallback"
+
+    azure_module._reset_block()  # the 30 minutes are over
+    translator, _, _ = _azure(monkeypatch, [_azure_ok()])
+    assert translator.do_translate("b") == "azure"
+    assert azure_module.fallback_status() == {"state": "ok"}
+
+
+def test_unwritable_state_file_never_breaks_a_translation(monkeypatch, tmp_path):
+    monkeypatch.setenv("AZURE_STATE_FILE", str(tmp_path / "missing-dir" / "state.json"))
+    translator, _, _ = _azure(monkeypatch, [FakeResponse(status=401)], [_bing_ok()])
+    assert translator.do_translate("a") == "bing"

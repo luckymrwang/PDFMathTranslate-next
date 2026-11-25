@@ -1,6 +1,10 @@
+import json
 import logging
+import os
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 import requests
 from pdf2zh_next.config.model import SettingsModel
@@ -25,9 +29,10 @@ BLOCK_THROTTLE_SECONDS = 60
 class AzureUnavailableError(Exception):
     """Azure refuses requests for now (quota, key, throttling); retrying will not help."""
 
-    def __init__(self, message: str, block_seconds: int):
+    def __init__(self, message: str, block_seconds: int, status: int = 0):
         super().__init__(message)
         self.block_seconds = block_seconds
+        self.status = status
 
 
 class AzureTransientError(Exception):
@@ -59,6 +64,80 @@ def _reset_block() -> None:
     global _blocked_until
     with _block_lock:
         _blocked_until = 0.0
+
+
+# Every task translates in its own subprocess, so the block above is invisible to the
+# API process and to other tasks. This small file is how an outage is seen from outside
+# (GET /health -> "azure"): written when Azure first stops answering, cleared when it
+# answers again. One outage is one record, however many blocks it takes to end.
+RECOVERY_CHECK_SECONDS = 30
+_last_recovery_check = 0.0
+
+
+def _state_file() -> Path:
+    return Path(
+        os.environ.get("AZURE_STATE_FILE")
+        or Path(tempfile.gettempdir()) / "pdf2zh-azure-state.json"
+    )
+
+
+def fallback_status() -> dict:
+    """{"state": "ok"} or {"state": "fallback", "since", "status", "reason", "last_block"}."""
+    try:
+        data = json.loads(_state_file().read_text())
+    except (OSError, ValueError):
+        return {"state": "ok"}
+    return (
+        data
+        if isinstance(data, dict) and data.get("state") == "fallback"
+        else {"state": "ok"}
+    )
+
+
+def _write_state(data: dict) -> None:
+    path = _state_file()
+    try:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except OSError as e:  # reporting must never break a translation
+        logger.debug(f"cannot write Azure state: {e}")
+
+
+def _record_fallback(status: int, reason: str) -> None:
+    now = int(time.time())
+    current = fallback_status()
+    if current["state"] == "fallback":
+        current["last_block"] = now  # same outage: keep when it began
+        _write_state(current)
+        return
+    _write_state(
+        {
+            "state": "fallback",
+            "since": now,
+            "last_block": now,
+            "status": status,
+            "reason": reason[:200],
+        }
+    )
+
+
+def _record_recovery() -> None:
+    """Azure answered: end the outage record (checked at most every RECOVERY_CHECK_SECONDS)."""
+    global _last_recovery_check
+    now = time.monotonic()
+    if now - _last_recovery_check < RECOVERY_CHECK_SECONDS:
+        return
+    _last_recovery_check = now
+    current = fallback_status()
+    if current["state"] == "fallback":
+        _write_state(
+            {
+                "state": "ok",
+                "recovered": int(time.time()),
+                "since": current.get("since", 0),
+            }
+        )
 
 
 class AzureTranslator(BaseTranslator):
@@ -119,15 +198,18 @@ class AzureTranslator(BaseTranslator):
             raise AzureUnavailableError(
                 f"Azure rejected the request ({status}): {response.text[:200]}",
                 BLOCK_AUTH_SECONDS,
+                status,
             )
         if status == 429:
             raise AzureUnavailableError(
-                "Azure throttled the request (429)", BLOCK_THROTTLE_SECONDS
+                "Azure throttled the request (429)", BLOCK_THROTTLE_SECONDS, 429
             )
         if status >= 500:
             raise AzureTransientError(f"Azure server error {status}")
         response.raise_for_status()
-        return response.json()[0]["translations"][0]["text"]
+        translated = response.json()[0]["translations"][0]["text"]
+        _record_recovery()
+        return translated
 
     def do_translate(self, text, rate_limit_params: dict = None):
         if self.fallback_to_bing and _is_blocked():
@@ -141,6 +223,10 @@ class AzureTranslator(BaseTranslator):
                 logger.warning(
                     f"{e}; using Bing for the next {e.block_seconds // 60} minutes"
                 )
+            if (
+                e.status != 429
+            ):  # throttling clears in a minute; not an outage to report
+                _record_fallback(e.status, str(e))
         except Exception as e:
             if not self.fallback_to_bing:
                 raise

@@ -11,6 +11,17 @@ from pdf2zh_next import http_api as api
 
 
 class PaidPDFAPITest(unittest.IsolatedAsyncioTestCase):
+    def test_health_reports_whether_azure_has_fallen_back(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ", {"AZURE_STATE_FILE": str(Path(tmp) / "state.json")}
+        ):
+            self.assertEqual(asyncio.run(api.health())["azure"], {"state": "ok"})
+            (Path(tmp) / "state.json").write_text(
+                '{"state": "fallback", "since": 1, "status": 403, "reason": "quota"}'
+            )
+            azure = asyncio.run(api.health())["azure"]
+            self.assertEqual((azure["state"], azure["status"]), ("fallback", 403))
+
     def test_trial_settings_include_only_requested_pages(self):
         request = api.TranslateRequest(
             pages="1-3", only_include_translated_page=True,
