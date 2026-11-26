@@ -495,3 +495,35 @@ def test_deepseek_base_url_defaults_to_official_endpoint():
     )
     settings.validate_settings()
     assert settings.transform().openai_base_url == "https://api.deepseek.com/v1"
+
+
+def _transformed(model, base_url, mode="disabled"):
+    return DeepSeekSettings(
+        deepseek_api_key="k",
+        deepseek_model=model,
+        deepseek_base_url=base_url,
+        deepseek_thinking_mode=mode,
+    ).transform()
+
+
+def test_thinking_switch_is_sent_to_a_proxy_serving_another_model():
+    settings = _transformed("workbuddy-ai/hy4flash-free", "https://proxy.example:63425/v1")
+    assert settings._openai_extra_body == {"thinking": {"type": "disabled"}}
+
+
+def test_thinking_switch_is_not_sent_to_unknown_models_on_deepseeks_own_api():
+    for base in (None, "https://api.deepseek.com/v1"):
+        settings = _transformed("deepseek-chat", base)
+        assert settings._openai_extra_body is None
+
+
+def test_thinking_switch_still_follows_known_deepseek_models():
+    settings = _transformed("deepseek-flash", None)
+    assert settings._openai_extra_body == {"thinking": {"type": "disabled"}}
+    settings = _transformed("deepseek-v4-pro", "https://api.deepseek.com/v1", mode="enabled")
+    assert settings._openai_extra_body == {"thinking": {"type": "enabled"}}
+
+
+def test_thinking_switch_is_left_alone_when_not_configured():
+    settings = _transformed("workbuddy-ai/hy4flash-free", "https://proxy.example/v1", mode=None)
+    assert settings._openai_extra_body is None

@@ -262,9 +262,16 @@ class DeepSeekSettings(BaseModel):
             openai_base_url=self.deepseek_base_url or "https://api.deepseek.com/v1",
             openai_enable_json_mode=self.deepseek_enable_json_mode,
         )
+        # DeepSeek's own API only takes the switch on its v4 models. Behind a custom
+        # base URL (a proxy serving some other reasoning model) the model name says
+        # nothing, so the switch the operator configured is sent as is.
+        custom_endpoint = bool(self.deepseek_base_url) and (
+            "api.deepseek.com" not in self.deepseek_base_url
+        )
         if self.deepseek_model and (
             self.deepseek_model.startswith("deepseek-v4-")
             or self.deepseek_model == "deepseek-flash"
+            or custom_endpoint
         ):
             if self.deepseek_thinking_mode == "enabled":
                 settings._openai_extra_body = {"thinking": {"type": "enabled"}}
